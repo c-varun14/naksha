@@ -71,3 +71,50 @@ def test_stock_door_reward_requires_a_rise_above_spawn_height():
     ]:
         shaped, _, _ = reward.step({**state, "sector_ceiling": np.array(ceilings)})
         assert shaped == pytest.approx(door_bonus - 0.0005)
+
+
+def _reward_state(**over):
+    state = {
+        "x": 0, "y": 0, "sector_ceiling": np.array([64]), "keys": np.zeros(6), "health": 100, "kills": 0,
+        "exit_reached": False, "dead": False, "tic": 100, "episode_ticks": 2100,
+    }
+    return {**state, **over}
+
+
+def _one_step(before, after, **kw):
+    return EpisodeReward(before, {}, **kw).step(after)[0]
+
+
+def test_default_reward_terms_are_unchanged():
+    start = _reward_state()
+    assert _one_step(start, _reward_state(health=70)) == pytest.approx(-0.0005 - 0.003 * 30)
+    assert _one_step(start, _reward_state(dead=True, health=0)) == pytest.approx(-0.0005 - 1.0 - 0.3)
+    exit_reward = 1.0 + 0.5 * (2100 - 100) / 2100
+    assert _one_step(start, _reward_state(exit_reached=True, health=50), ) == pytest.approx(-0.0005 + exit_reward - 0.15)
+
+
+def test_survival_pays_for_health_at_exit_and_charges_early_death():
+    healthy = _one_step(_reward_state(), _reward_state(exit_reached=True), survival=True)
+    hurt = _one_step(_reward_state(health=50), _reward_state(exit_reached=True, health=50), survival=True)
+    assert healthy - hurt == pytest.approx(0.25)
+    early = _one_step(_reward_state(health=10), _reward_state(dead=True, health=0, tic=100), survival=True)
+    late = _one_step(_reward_state(health=10, tic=2000), _reward_state(dead=True, health=0, tic=2000), survival=True)
+    assert early < late < 0
+
+
+def test_survival_healing_earns_less_than_damage_costs():
+    heal = _one_step(_reward_state(health=40), _reward_state(health=65), survival=True)
+    hurt = _one_step(_reward_state(health=65), _reward_state(health=40), survival=True)
+    assert heal == pytest.approx(-0.0005 + 0.004 * 25)
+    assert heal + hurt < 0
+    over = _one_step(_reward_state(health=90), _reward_state(health=125), survival=True)
+    assert over == pytest.approx(-0.0005 + 0.004 * 10)
+
+
+def test_stall_penalty_starts_after_150_steps_without_a_new_cell():
+    reward = EpisodeReward(_reward_state(), {}, stall_penalty=0.002)
+    shaped = [reward.step(_reward_state())[0] for _ in range(151)]
+    assert shaped[148] == pytest.approx(-0.0005)
+    assert shaped[149] == pytest.approx(-0.0005 - 0.002)
+    moved = reward.step(_reward_state(x=64))[0]
+    assert moved == pytest.approx(-0.0005 + 0.02)

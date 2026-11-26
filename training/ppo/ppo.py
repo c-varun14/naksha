@@ -59,7 +59,17 @@ def _cell(state: dict) -> tuple[int, int]:
 
 
 class EpisodeReward:
-    def __init__(self, state: dict, door_locks: dict[int, int], *, stock: bool = False) -> None:
+    """Shaped PPO reward. `survival` adds the official score's survival terms (health bonus at the exit, a
+    larger penalty for dying early, double damage cost, healing while hurt); `stall_penalty` is charged per
+    step once STALL_STEPS steps pass without a new cell."""
+
+    STALL_STEPS = 150
+
+    def __init__(self, state: dict, door_locks: dict[int, int], *, stock: bool = False,
+                 survival: bool = False, stall_penalty: float = 0.0) -> None:
+        self.survival = survival
+        self.stall_penalty = stall_penalty
+        self.stale = 0
         self.previous = state
         self.door_locks = door_locks
         self.door_thresholds = {
@@ -79,8 +89,13 @@ class EpisodeReward:
         if state["exit_reached"] and not previous["exit_reached"]:
             ticks = state["episode_ticks"]
             reward += 1.0 + 0.5 * max(0, ticks - state["tic"]) / ticks
+            if self.survival:
+                reward += 0.5 * max(0.0, float(state["health"])) / 100.0
         if state["dead"] and not previous["dead"]:
             reward -= 1.0
+            if self.survival:
+                ticks = state["episode_ticks"]
+                reward -= max(0, ticks - state["tic"]) / ticks
         reward += 0.5 * np.count_nonzero(np.logical_and(state["keys"], np.logical_not(previous["keys"])))
         for sector, lock in self.door_locks.items():
             threshold = self.door_thresholds[sector]
@@ -92,7 +107,13 @@ class EpisodeReward:
         novel = int(cell not in self.cells)
         self.cells.add(cell)
         kills = max(0, state["kills"] - previous["kills"])
-        reward += 0.02 * novel + 0.1 * kills - 0.003 * max(0, previous["health"] - state["health"])
+        lost = max(0, previous["health"] - state["health"])
+        reward += 0.02 * novel + 0.1 * kills - (0.006 if self.survival else 0.003) * lost
+        if self.survival and previous["health"] < 100:
+            reward += 0.004 * min(max(0, state["health"] - previous["health"]), 100 - previous["health"])
+        self.stale = 0 if novel else self.stale + 1
+        if self.stall_penalty and self.stale >= self.STALL_STEPS:
+            reward -= self.stall_penalty
         reward = float(np.clip(reward, -2.0, 2.0))
         self.total += reward
         self.previous = state
@@ -157,7 +178,9 @@ class Collector:
                             look_seed=seed if restyle else None)
         self.env = make_env(wad, spec.get("map", "MAP01"), episode_ticks=spec["episode_ticks"], render_buffers=True)
         self.obs, _ = self.env.reset(seed=seed)
-        self.reward = EpisodeReward(self.env.privileged_state(), self.env.mapinfo.door_sectors, stock=self.stock)
+        self.reward = EpisodeReward(self.env.privileged_state(), self.env.mapinfo.door_sectors, stock=self.stock,
+                                    survival=getattr(args, "survival", False),
+                                    stall_penalty=getattr(args, "stall_penalty", 0.0))
         self.hidden = self.model.initial_state(1)
         self.prev_action = 0
 
@@ -426,6 +449,9 @@ def train(args: argparse.Namespace) -> dict:
     log_path = Path("runs/ppo") / args.out.stem / "log.csv"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     meta = {"init": str(args.init), "iterations": 0, "steps": 0}
+    survival, stall = getattr(args, "survival", False), getattr(args, "stall_penalty", 0.0)
+    if survival or stall:
+        meta["reward"] = {"survival": survival, "stall_penalty": stall}
     deadline = perf_counter() + 60 * args.minutes
     with TemporaryDirectory(prefix="naksha-ppo-") as scratch, log_path.open("w", newline="", encoding="utf-8") as log:
         weights = Path(scratch) / "policy.pt"
@@ -479,6 +505,10 @@ def main(argv: Sequence[str] | None = None) -> None:
                         help="maze lattice side per size (default 15 25 35)")
     parser.add_argument("--look-frac", type=float, default=0.0,
                         help="probability that a generated map gets a random appearance (textures, light, ceiling)")
+    parser.add_argument("--survival", action="store_true",
+                        help="survival reward terms: health bonus at the exit, early-death penalty, 2x damage cost, healing")
+    parser.add_argument("--stall-penalty", type=float, default=0.0,
+                        help="per-step penalty once 150 steps pass without a new cell")
     parser.add_argument("--seed-offset", type=int, default=300_000)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--kl-coef", type=float, default=0.05)
@@ -503,6 +533,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("stock-frac must be in [0, 1]")
     if not 0 <= args.look_frac <= 1:
         parser.error("look-frac must be in [0, 1]")
+    if not (math.isfinite(args.stall_penalty) and args.stall_penalty >= 0):
+        parser.error("stall-penalty must be finite and nonnegative")
     if args.stock_frac and not args.stock_maps:
         parser.error("stock-maps is required when stock-frac is positive")
     if args.init.resolve() == args.out.resolve():
