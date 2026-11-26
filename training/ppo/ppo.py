@@ -54,6 +54,19 @@ def gae(
     return advantages, advantages + values[:-1]
 
 
+def transform_grid(grid: str, turns: int, mirror: bool) -> str:
+    """Rotate an ASCII grid by `turns` quarter turns clockwise, then mirror it left-right if asked. Doors,
+    keys and walls keep their neighbours, so a valid map stays valid."""
+    rows = grid.strip("\n").split("\n")
+    width = max(len(r) for r in rows)
+    rows = [r.ljust(width, "#") for r in rows]
+    for _ in range(turns % 4):
+        rows = ["".join(col) for col in zip(*rows[::-1])]
+    if mirror:
+        rows = [r[::-1] for r in rows]
+    return "\n".join(rows)
+
+
 def _cell(state: dict) -> tuple[int, int]:
     return int(state["x"] // CELL), int(state["y"] // CELL)
 
@@ -225,6 +238,8 @@ class Collector:
         self.model = NakshaNet().eval()
         self.env = None
         self.stock_specs = build_specs(getattr(args, "stock_maps", ()))
+        extra = getattr(args, "extra_suite", None)
+        self.extra_specs = json.loads(Path(extra).read_text()) if extra else []
 
     def _start_episode(self) -> None:
         k = self.episode_counter.value
@@ -243,6 +258,11 @@ class Collector:
             if sides:
                 families.MAZE_SIDES = dict(zip(SIZES, sides))
             spec = generate(family, seed, size)
+            pick = random.Random(seed + 104_729)
+            if self.extra_specs and pick.random() < getattr(args, "extra_frac", 0.0):
+                base = pick.choice(self.extra_specs)
+                spec = {"grid": transform_grid(base["grid"], pick.randrange(4), pick.random() < 0.5),
+                        "player_angle": pick.choice((0, 90, 180, 270)), "episode_ticks": base["episode_ticks"]}
             restyle = random.Random(seed + 7_919).random() < getattr(args, "look_frac", 0.0)
             wad = write_map(spec["grid"], "map.wad", player_angle=spec["player_angle"],
                             look_seed=seed if restyle else None)
@@ -582,6 +602,10 @@ def main(argv: Sequence[str] | None = None) -> None:
                         help="probability that a generated map gets a random appearance (textures, light, ceiling)")
     parser.add_argument("--survival", action="store_true",
                         help="survival reward terms: health bonus at the exit, early-death penalty, 2x damage cost, healing")
+    parser.add_argument("--extra-suite", type=Path,
+                        help="JSON list of map specs (grid, episode_ticks) to train on, randomly rotated and mirrored")
+    parser.add_argument("--extra-frac", type=float, default=0.0,
+                        help="probability that a generated-map episode uses a map from --extra-suite instead")
     parser.add_argument("--score-reward", action="store_true",
                         help="on generated maps, reward = per-step change in the judge-style map score / 45")
     parser.add_argument("--stall-penalty", type=float, default=0.0,
@@ -610,6 +634,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("stock-frac must be in [0, 1]")
     if not 0 <= args.look_frac <= 1:
         parser.error("look-frac must be in [0, 1]")
+    if not 0 <= args.extra_frac <= 1 or (args.extra_frac and not args.extra_suite):
+        parser.error("extra-frac must be in [0, 1] and needs --extra-suite")
+    if args.extra_suite:
+        args.extra_suite = args.extra_suite.resolve()  # workers run in a scratch directory
     if args.score_reward and args.survival:
         parser.error("--score-reward and --survival are alternatives")
     if not (math.isfinite(args.stall_penalty) and args.stall_penalty >= 0):

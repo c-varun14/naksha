@@ -174,3 +174,19 @@ def test_score_reward_charges_early_death_and_loses_the_exit():
     late.step(_score_state(1, 1, dead=True, health=0, damage_taken=100, tic=2000))
     assert early.total < late.total < 0
     assert early.total == pytest.approx((-2.0 - 10 * (1 - 100 / 2100)) / 45)
+
+
+def test_transform_grid_keeps_the_map_valid():
+    from collections import Counter
+
+    from training.gen.compile import compile_grid
+    from training.ppo.ppo import transform_grid
+
+    grid = "#######\n#P.#..#\n#..D.E#\n#r.#..#\n#######"
+    for turns in range(4):
+        for mirror in (False, True):
+            out = transform_grid(grid, turns, mirror)
+            assert Counter(out.replace("\n", "")) == Counter(grid.replace("\n", ""))
+            compile_grid(out)  # raises on an invalid door or symbol
+    assert transform_grid(transform_grid(grid, 1, False), 3, False) == grid
+    assert transform_grid(grid, 1, False).split("\n")[0] == "#####"
