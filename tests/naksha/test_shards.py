@@ -26,12 +26,25 @@ def _episode(length: int) -> dict[str, np.ndarray]:
 
 def test_round_trip_and_padding(tmp_path: Path) -> None:
     steps = _episode(3)
+    steps["rays"][0, 0, 0] = 0.12345
     write_episode(tmp_path, "episode", steps, {"seed": 4})
     dataset = SequenceDataset([tmp_path])
     assert dataset.lengths == [3]
     assert dataset.metadata == [{"seed": 4}]
+    compact_dtypes = {"rays": np.float16, "ents": np.float16, "ent_mask": np.float16,
+                      "vitals": np.float16, "prev_action": np.uint8}
+    with np.load(tmp_path / "episode.npz", allow_pickle=False) as stored:
+        for key, expected in steps.items():
+            assert stored[key].dtype == expected.dtype
+            np.testing.assert_array_equal(stored[key], expected)
     for key, expected in steps.items():
-        np.testing.assert_array_equal(dataset.episodes[0][key], expected)
+        array = dataset.episodes[0][key]
+        assert array.dtype == compact_dtypes.get(key, expected.dtype)
+        np.testing.assert_array_equal(array, expected.astype(array.dtype))
+    before = sum(array.nbytes for array in steps.values())
+    after = sum(array.nbytes for array in dataset.episodes[0].values())
+    assert after < before
+    print(f"Episode arrays: {before:,} -> {after:,} bytes ({1 - after / before:.1%} saved)")
     chunk = dataset.sample(4, 5, np.random.default_rng(0))
     assert chunk["valid"].shape == (5, 4)
     for key, expected in steps.items():
@@ -43,7 +56,8 @@ def test_round_trip_and_padding(tmp_path: Path) -> None:
         assert 1 <= length <= 3
         np.testing.assert_array_equal(valid, np.arange(5) < length)
         for key, expected in steps.items():
-            np.testing.assert_array_equal(chunk[key][:length, column], expected[-length:])
+            compact = expected[-length:].astype(compact_dtypes.get(key, expected.dtype))
+            np.testing.assert_array_equal(chunk[key][:length, column], compact.astype(expected.dtype))
             assert not chunk[key][length:, column].any()
 
 

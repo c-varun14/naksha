@@ -16,6 +16,7 @@ from torch.nn import functional as F
 
 import training.paths  # noqa: F401
 from naksha import features, model
+from training.data.augment import mirror_rate_batch
 from training.data.shards import SequenceDataset
 
 BURN_IN = 16
@@ -75,7 +76,7 @@ def train(args: argparse.Namespace) -> dict:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     log_path = Path("runs") / args.out.stem / "log.csv"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    best = {"data": args.data, "git_sha": _git_sha(), "val_loss": float("inf")}
+    best = {"data": args.data, "git_sha": _git_sha(), "val_loss": float("inf"), "mirror": args.mirror}
 
     def validate(update: int) -> tuple[float, float]:
         net.eval()
@@ -95,6 +96,8 @@ def train(args: argparse.Namespace) -> dict:
         deadline = time.monotonic() + args.minutes * 60
         while time.monotonic() < deadline:
             chunk = train_data.sample(args.batch, chunk_len, rng, min_steps=BURN_IN + 1)
+            if args.mirror:
+                chunk = mirror_rate_batch(chunk, args.mirror, rng)
             optimizer.zero_grad(set_to_none=True)
             loss, acc = _batch_loss(net, chunk, device)
             loss.backward()
@@ -125,7 +128,10 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--init", type=Path)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--mirror", type=float, default=0.0)
     args = parser.parse_args()
+    if not 0 <= args.mirror <= 1:
+        parser.error("mirror must be between 0 and 1")
     if not np.isfinite(args.minutes) or args.minutes < 0 or min(args.batch, args.seq) < 1:
         parser.error("minutes must be finite and nonnegative, and batch and seq must be positive")
     print(json.dumps(train(args)))

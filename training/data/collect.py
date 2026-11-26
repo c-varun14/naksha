@@ -43,14 +43,16 @@ def collect_one(task: dict) -> dict:
     from training.gen.compile import write_map
     from training.gen.families import generate
     from training.teacher.teacher import Teacher
+    from training.teacher.teacher2 import Teacher2
 
     fam, size, seed = task["family"], task["size"], task["seed"]
+    teacher_version = task.get("teacher", "v1")
     spec = generate(fam, seed, size)
     wad = write_map(spec["grid"], ROOT / f"data/maps/train/{fam}-{size}-{seed}.wad", player_angle=spec["player_angle"])
     env = make_env(str(wad), "MAP01", episode_ticks=spec["episode_ticks"], render_buffers=True)
     rng = np.random.default_rng(seed + 7919 * task.get("round", 0))
     obs, _ = env.reset(seed=int(seed))
-    teacher = Teacher(spec, seed)
+    teacher = (Teacher2 if teacher_version == "v2" else Teacher)(spec, seed)
     teacher.reset(env)
 
     student, state = None, None
@@ -105,7 +107,7 @@ def collect_one(task: dict) -> dict:
     meta = {"map": f"{fam}-{size}-{seed}", "family": fam, "size": size, "seed": seed, "policy": task["mode"],
             "beta": task.get("beta", 1.0), "exit": bool(info_env["exit_reached"]), "dead": end["dead"],
             "keys": int(sum(end["keys"])), "locks": len(spec["locks"]), "kills": end["kills"], "steps": len(steps["label"]),
-            "FEATURES_VERSION": F.FEATURES_VERSION}
+            "teacher": teacher_version, "FEATURES_VERSION": F.FEATURES_VERSION}
     name = f"{fam}-{size}-{seed}-{task['mode']}{task.get('round', 0)}"
     write_episode(task["out"], name, steps, meta)
     return meta
@@ -120,6 +122,7 @@ def main():
     ap.add_argument("--seeds", nargs=2, type=int, default=[0, 100])
     ap.add_argument("--procs", type=int, default=11)
     ap.add_argument("--mode", choices=["teacher", "dagger"], default="teacher")
+    ap.add_argument("--teacher", choices=["v1", "v2"], default="v1")
     ap.add_argument("--beta", type=float, default=0.0)
     ap.add_argument("--weights", default=None)
     ap.add_argument("--round", type=int, default=0)
@@ -130,7 +133,7 @@ def main():
         fam = a.families[seed % len(a.families)]
         size = a.sizes[(seed // len(a.families)) % len(a.sizes)]
         tasks.append({"family": fam, "size": size, "seed": seed, "mode": a.mode, "beta": a.beta,
-                      "weights": a.weights, "out": a.out, "round": a.round})
+                      "weights": a.weights, "out": a.out, "round": a.round, "teacher": a.teacher})
     t0 = time.time()
     stats, steps = Counter(), 0
     with mp.get_context("spawn").Pool(a.procs, maxtasksperchild=50) as pool:

@@ -55,6 +55,29 @@ def _save_state(path: Path, state: dict) -> None:
     temporary.replace(path)
 
 
+def _select_data_dirs(
+    data_dirs: Sequence[str], max_steps: int, step_counts: dict[Path, int],
+) -> list[str]:
+    selected = []
+    remaining = max_steps
+    for directory in data_dirs:
+        path = Path(directory)
+        if path not in step_counts:
+            episodes = list(path.glob("*.npz"))
+            if not episodes:
+                raise ValueError(f"no episodes in {directory}")
+            step_counts[path] = sum(
+                json.loads(episode.with_suffix(".json").read_text(encoding="utf-8"))["steps"]
+                for episode in episodes
+            )
+        count = step_counts[path]
+        if count > remaining:
+            break
+        selected.append(directory)
+        remaining -= count
+    return selected
+
+
 def _evaluate(checkpoint: str, name: str, args: argparse.Namespace, log_path: Path) -> float:
     _run_module("training.eval.run", [
         "--suite", "data/suites/dev.json", "--policy", "agent", "--weights", checkpoint,
@@ -67,6 +90,24 @@ def _evaluate(checkpoint: str, name: str, args: argparse.Namespace, log_path: Pa
 def _loop(args: argparse.Namespace) -> dict:
     args.work.mkdir(parents=True, exist_ok=True)
     state_path = args.work / "state.json"
+    resuming = state_path.exists()
+    if resuming:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        saved = state["config"]
+        if args.dev_seeds is not None and args.dev_seeds != saved["dev_seeds"]:
+            raise ValueError(f"dev-seeds must match the evaluations saved in {state_path}")
+        args.dev_seeds = saved["dev_seeds"]
+        args.init = saved["init"]
+        if args.data_dirs is None:
+            args.data_dirs = saved["data_dirs"]
+        if args.seed_offset is None:
+            args.seed_offset = saved["seed_offset"]
+    else:
+        args.dev_seeds = 2 if args.dev_seeds is None else args.dev_seeds
+        args.data_dirs = args.data_dirs or []
+        args.seed_offset = 200000 if args.seed_offset is None else args.seed_offset
+        state = {"round": 0, "best_checkpoint": args.init, "scores": {}, "history": []}
+
     config = {
         "init": args.init,
         "episodes": args.episodes,
@@ -75,54 +116,64 @@ def _loop(args: argparse.Namespace) -> dict:
         "data_dirs": args.data_dirs,
         "seed_offset": args.seed_offset,
         "dev_seeds": args.dev_seeds,
+        "teacher": args.teacher,
+        "mirror": args.mirror,
+        "max_steps": args.max_steps,
     }
-    if state_path.exists():
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        if state["config"] != config:
-            raise ValueError(f"resume options differ from those saved in {state_path}")
-    else:
-        state = {"config": config, "round": 0, "best_checkpoint": args.init, "scores": {}, "history": []}
+    state["config"] = config
+    if not resuming:
         _save_state(state_path, state)
 
     history = state["history"]
     scores = state["scores"]
+    step_counts: dict[Path, int] = {}
     work_id = hashlib.sha256(str(args.work.resolve()).encode()).hexdigest()[:16]
     for r in range(state["round"], args.rounds):
         round_dir = args.work / f"round{r}"
         round_dir.mkdir(exist_ok=True)
-        data_dir = f"data/dagger_r{r}"
-        checkpoint = str(round_dir / "ckpt.pt")
-        incumbent = state["best_checkpoint"]
-        beta = args.betas[min(r, len(args.betas) - 1)]
-
         if len(history) == r:
-            start = args.seed_offset + r * args.episodes
-            stop = start + args.episodes
-            collect_log = round_dir / "collect.log"
-            _run_module("training.data.collect", [
-                "--out", data_dir, "--seeds", str(start), str(stop), "--procs", str(args.procs),
-                "--mode", "dagger", "--beta", str(beta), "--weights", incumbent, "--round", str(r),
-            ], collect_log)
-            collected = _collected_episodes(collect_log)
-            if collected <= 0:
-                raise ValueError(f"round {r} collected no episodes; see {collect_log}")
-            if collected != args.episodes:
-                print(f"Round {r} collected {collected} of {args.episodes} requested episodes", flush=True)
+            previous_stop = max((item["seed_stop"] for item in history), default=args.seed_offset)
+            start = max(args.seed_offset, previous_stop)
             history.append({
-                "round": r, "beta": beta, "seed_start": start, "seed_stop": stop,
-                "data_dir": data_dir, "episodes": collected, "checkpoint": checkpoint,
-                "incumbent": incumbent, "trained": False,
+                "round": r, "beta": args.betas[min(r, len(args.betas) - 1)],
+                "seed_start": start, "seed_stop": start + args.episodes,
+                "data_dir": f"data/dagger_r{r}", "checkpoint": str(round_dir / "ckpt.pt"),
+                "incumbent": state["best_checkpoint"], "teacher": args.teacher, "trained": False,
             })
             _save_state(state_path, state)
 
         entry = history[r]
+        checkpoint = entry["checkpoint"]
+        incumbent = entry["incumbent"]
+        if "episodes" not in entry:
+            start, stop = entry["seed_start"], entry["seed_stop"]
+            collect_log = round_dir / "collect.log"
+            _run_module("training.data.collect", [
+                "--out", entry["data_dir"], "--seeds", str(start), str(stop), "--procs", str(args.procs),
+                "--mode", "dagger", "--beta", str(entry["beta"]), "--weights", incumbent, "--round", str(r),
+                "--teacher", entry["teacher"],
+            ], collect_log)
+            collected = _collected_episodes(collect_log)
+            if collected <= 0:
+                raise ValueError(f"round {r} collected no episodes; see {collect_log}")
+            if collected != stop - start:
+                print(f"Round {r} collected {collected} of {stop - start} requested episodes", flush=True)
+            entry["episodes"] = collected
+            _save_state(state_path, state)
+
         if not entry["trained"]:
-            data_dirs = [*args.data_dirs, *(item["data_dir"] for item in history)]
+            data_dirs = _select_data_dirs(
+                [*(item["data_dir"] for item in reversed(history)), *args.data_dirs],
+                args.max_steps, step_counts,
+            )
+            if not data_dirs:
+                raise ValueError(f"{entry['data_dir']} exceeds the training budget of {args.max_steps} steps")
             _run_module("training.bc.train", [
                 "--init", incumbent, "--data", *data_dirs, "--out", checkpoint,
-                "--minutes", str(args.train_minutes),
+                "--minutes", str(args.train_minutes), "--mirror", str(args.mirror),
             ], round_dir / "train.log")
             entry["trained"] = True
+            entry["mirror"] = args.mirror
             _save_state(state_path, state)
 
         for role, weights in (("candidate", checkpoint), ("incumbent", incumbent)):
@@ -138,7 +189,7 @@ def _loop(args: argparse.Namespace) -> dict:
         entry.update(candidate_score=candidate_score, incumbent_score=incumbent_score, best_checkpoint=best)
         state["round"] = r + 1
         _save_state(state_path, state)
-        print(f"Round {r} | episodes {entry['episodes']} | beta {beta:g} | candidate {candidate_score:.4f}"
+        print(f"Round {r} | episodes {entry['episodes']} | beta {entry['beta']:g} | candidate {candidate_score:.4f}"
               f" | incumbent {incumbent_score:.4f} | best {best}", flush=True)
 
     best = state["best_checkpoint"]
@@ -147,24 +198,33 @@ def _loop(args: argparse.Namespace) -> dict:
 
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--init", required=True)
-    parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--init", help="initial checkpoint for a new run")
+    parser.add_argument("--rounds", type=int, default=3, help="total number of rounds")
     parser.add_argument("--episodes", type=int, default=600)
     parser.add_argument("--betas", nargs="+", type=float, default=[0.5, 0.25, 0.0])
     parser.add_argument("--train-minutes", type=float, default=15.0)
-    parser.add_argument("--data-dirs", nargs="+", default=[])
+    parser.add_argument("--data-dirs", nargs="+")
     parser.add_argument("--work", type=Path, default=Path("runs/dagger"))
     parser.add_argument("--procs", type=int, default=10)
-    parser.add_argument("--seed-offset", type=int, default=200000)
-    parser.add_argument("--dev-seeds", type=int, default=2)
+    parser.add_argument("--seed-offset", type=int)
+    parser.add_argument("--dev-seeds", type=int)
+    parser.add_argument("--teacher", choices=["v1", "v2"], default="v1")
+    parser.add_argument("--mirror", type=float, default=0.0)
+    parser.add_argument("--max-steps", type=int, default=1_100_000, help="training data step budget")
     args = parser.parse_args(argv)
-    if min(args.rounds, args.episodes, args.procs, args.dev_seeds) < 1:
-        parser.error("rounds, episodes, procs, and dev-seeds must be positive")
+    if args.init is None and not (args.work / "state.json").is_file():
+        parser.error("--init is required for a new run")
+    if min(args.rounds, args.episodes, args.procs, args.max_steps) < 1 or (
+        args.dev_seeds is not None and args.dev_seeds < 1
+    ):
+        parser.error("rounds, episodes, procs, dev-seeds, and max-steps must be positive")
     if any(not 0 <= beta <= 1 for beta in args.betas):
         parser.error("betas must be between 0 and 1")
+    if not 0 <= args.mirror <= 1:
+        parser.error("mirror must be between 0 and 1")
     if not math.isfinite(args.train_minutes) or args.train_minutes < 0:
         parser.error("train-minutes must be finite and nonnegative")
-    if args.seed_offset < 0:
+    if args.seed_offset is not None and args.seed_offset < 0:
         parser.error("seed-offset must be nonnegative")
     print(json.dumps(_loop(args)))
 

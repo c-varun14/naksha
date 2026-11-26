@@ -15,6 +15,7 @@ from torch import Tensor
 from torch.nn import functional as F
 
 from training.bc.train import BURN_IN, _git_sha, _masked_mean
+from training.data.augment import mirror_rate_batch
 from training.data.shards import _FIELDS
 from training.memory.odometry_train import ODOMETRY_PATH, episode_paths, load_odometry
 from training.memory.precompute import PACKED_SHAPE, sidecar_path
@@ -147,7 +148,7 @@ def train(args: argparse.Namespace) -> dict:
     log_path = Path("runs") / args.out.stem / "log.csv"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     best = {"data": args.data, "git_sha": _git_sha(), "val_loss": float("inf"),
-            "memory": MEMORY_VERSION}
+            "memory": MEMORY_VERSION, "mirror": args.mirror}
 
     def validate(update: int) -> tuple[float, float]:
         net.eval()
@@ -167,6 +168,8 @@ def train(args: argparse.Namespace) -> dict:
         deadline = time.monotonic() + args.minutes * 60
         while time.monotonic() < deadline:
             chunk = dataset.sample(train_indices, args.batch, chunk_len, rng)
+            if args.mirror:
+                chunk = mirror_rate_batch(chunk, args.mirror, rng)
             optimizer.zero_grad(set_to_none=True)
             loss, acc = _batch_loss(net, chunk, device)
             loss.backward()
@@ -197,7 +200,10 @@ def main() -> None:
     parser.add_argument("--init", type=Path)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--odometry", type=Path, default=ODOMETRY_PATH)
+    parser.add_argument("--mirror", type=float, default=0.0)
     args = parser.parse_args()
+    if not 0 <= args.mirror <= 1:
+        parser.error("mirror must be between 0 and 1")
     if not np.isfinite(args.minutes) or args.minutes < 0 or min(args.batch, args.seq) < 1:
         parser.error("minutes must be finite and nonnegative, and batch and seq must be positive")
     print(json.dumps(train(args)))

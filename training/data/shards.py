@@ -23,6 +23,13 @@ _FIELDS = {
     "reward": ((), np.float32),
     "done": ((), np.bool_),
 }
+_RAM_DTYPES = {
+    "rays": np.float16,
+    "ents": np.float16,
+    "ent_mask": np.float16,
+    "vitals": np.float16,
+    "prev_action": np.uint8,
+}
 
 
 def _validate(steps: dict[str, np.ndarray]) -> int:
@@ -66,6 +73,8 @@ class SequenceDataset:
                 with np.load(path, allow_pickle=False) as episode:
                     steps = dict(episode)
                 self.lengths.append(_validate(steps))
+                for key, dtype in _RAM_DTYPES.items():
+                    steps[key] = steps[key].astype(dtype)
                 self.episodes.append(steps)
                 self.metadata.append(json.loads(path.with_suffix(".json").read_text(encoding="utf-8")))
         self.weights = None if weights is None else np.asarray(weights, dtype=np.float64)
@@ -98,6 +107,7 @@ class SequenceDataset:
             start = int(rng.integers(length - min_steps + 1))
             size = min(length - start, seq_len)
             for key, array in self.episodes[index].items():
+                # Assignment converts the compact arrays into the original field dtypes.
                 result[key][:size, column] = array[start:start + size]
             result["valid"][:size, column] = True
         return result
