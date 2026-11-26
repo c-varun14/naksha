@@ -81,7 +81,7 @@ def initial_state(outcome=None) -> dict:
     return {
         "step": 0, "tic": 0, "health": None, "keys": [], "kills": 0,
         "intention": dict.fromkeys(INTENTIONS, 0.0), "exit_vis": 0.0,
-        "macro": None, "outcome": outcome, "events": [],
+        "macro": None, "outcome": outcome, "events": [], "has_memory": False,
     }
 
 
@@ -102,9 +102,11 @@ def play_episode(wad, rows, ticks, weights, publish, *, stop=None, speed=None, s
         held = obs["vitals"][8:14] > 0
         events = []
         state = initial_state("running")
-        state.update(tic=pose["tic"], health=int(pose["health"]), kills=pose["kills"])
+        memory_rgb = agent.memory_rgb()
+        has_memory = memory_rgb is not None
+        state.update(tic=pose["tic"], health=int(pose["health"]), kills=pose["kills"], has_memory=has_memory)
         if not stop.is_set():
-            publish(state, encode_png(composite(obs["rgb"], audience)))
+            publish(state, encode_png(composite(obs["rgb"], audience, memory_rgb)))
         step = 0
         start = monotonic()
         while not stop.is_set():
@@ -152,9 +154,9 @@ def play_episode(wad, rows, ticks, weights, publish, *, stop=None, speed=None, s
                 "intention": dict(zip(INTENTIONS, map(float, agent.last_out["intention"]))),
                 "exit_vis": agent.last_out["exit_vis"],
                 "macro": NAMES[int(agent.last_out["logits"].argmax())],
-                "outcome": outcome, "events": events[-12:],
+                "outcome": outcome, "events": events[-12:], "has_memory": has_memory,
             }
-            publish(state, encode_png(composite(obs["rgb"], audience)))
+            publish(state, encode_png(composite(obs["rgb"], audience, agent.memory_rgb())))
             if finished:
                 break
         return events

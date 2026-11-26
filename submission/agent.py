@@ -13,7 +13,8 @@ from gymnasium.spaces import Space
 SUBMISSION_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SUBMISSION_DIR))
 
-from naksha import actions, features, model  # noqa: E402
+from naksha import actions, features  # noqa: E402
+from naksha.memory import CROP_SHAPE, MEMORY_VERSION, SensorMemory, load_any  # noqa: E402
 
 TEMPERATURE = 0.0
 
@@ -28,7 +29,8 @@ class DoomAgent:
         self.device = device
         torch.set_num_threads(1)
         path = weights or os.environ.get("NAKSHA_WEIGHTS") or SUBMISSION_DIR / "weights" / "naksha.pt"
-        self.model, meta = model.load_checkpoint(path)
+        self.model, meta = load_any(path)
+        self.memory = SensorMemory() if meta.get("memory") == MEMORY_VERSION else None
         # Actions are sampled from the policy distribution at this temperature (0 = argmax).
         # Sampling keeps every decision with the network while avoiding deterministic loops.
         default_t = float(meta.get("temperature", TEMPERATURE))
@@ -37,6 +39,8 @@ class DoomAgent:
         self.model.eval()
         zeros = {key: torch.from_numpy(np.zeros((1, 1, *shape), dtype))
                  for key, (shape, dtype) in features.SHAPES.items()}
+        if self.memory is not None:
+            zeros["memory"] = torch.zeros((1, 1, *CROP_SHAPE), dtype=torch.uint8)
         with torch.inference_mode():
             self.model(zeros, self.model.initial_state(1))
         self.reset()
@@ -47,10 +51,19 @@ class DoomAgent:
         self.state = self.model.initial_state(1)
         self.prev_action = 0
         self.last_out: dict[str, np.ndarray | float] = {}
+        if self.memory is not None:
+            self.memory.reset()
+
+    def memory_rgb(self) -> np.ndarray | None:
+        if self.memory is not None:
+            return self.memory.grid.render_rgb()
+        return None
 
     @torch.inference_mode()
     def act(self, obs: dict) -> np.ndarray:
         encoded = features.encode(obs, self.prev_action)
+        if self.memory is not None:
+            encoded["memory"] = self.memory.step(encoded, self.model.odometry)
         inputs = {key: torch.from_numpy(data)[None, None] for key, data in encoded.items()}
         out, self.state = self.model(inputs, self.state)
         logits = out["logits"][0, 0]

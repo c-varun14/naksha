@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from demo.server import BUILT_INS, DemoServer  # noqa: E402
 from demo.render import AudienceMap, composite, encode_png  # noqa: E402
 from doom_env.spaces import FRAME_SKIP  # noqa: E402
+from naksha.memory import MEMORY_VERSION, NakshaMemNet  # noqa: E402
 from naksha.model import INTENTIONS, NakshaNet, save_checkpoint  # noqa: E402
 
 
@@ -80,12 +81,14 @@ def test_run_requires_player_start(serve_demo):
         assert "exactly one P" in json.load(response)["error"]
 
 
-def test_episode_updates_state(serve_demo, tmp_path):
+@pytest.mark.parametrize("has_memory", [False, True], ids=["two-panels", "three-panels"])
+def test_episode_updates_state(serve_demo, tmp_path, has_memory):
     server, url = serve_demo
     server.weights = tmp_path / "random.pt"
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
-        save_checkpoint(server.weights, NakshaNet(), {})
+        net = NakshaMemNet() if has_memory else NakshaNet()
+        save_checkpoint(server.weights, net, {"memory": MEMORY_VERSION} if has_memory else {})
     with urlopen(f"{url}/maps", timeout=5) as response:
         assert json.load(response) == list(BUILT_INS)
     with post_run(url, grid=BUILT_INS[0]["grid"], ticks=30 * FRAME_SKIP, speed=4) as response:
@@ -102,6 +105,7 @@ def test_episode_updates_state(serve_demo, tmp_path):
         sleep(0.02)
 
     assert state["run_id"] == run_id
+    assert state["has_memory"] is has_memory
     assert state["step"] == 30
     assert state["outcome"] == "timeout"
     assert set(state["intention"]) == set(INTENTIONS)
@@ -111,4 +115,13 @@ def test_episode_updates_state(serve_demo, tmp_path):
     assert state["events"]
     with urlopen(f"{url}/frame.png", timeout=5) as response:
         assert response.headers.get_content_type() == "image/png"
-        assert struct.unpack_from(">II", response.read(), 16) == (840, 360)
+        png = response.read()
+    width, height = struct.unpack_from(">II", png, 16)
+    assert (width, height) == (1200 if has_memory else 840, 360)
+    if has_memory:
+        size, kind = struct.unpack_from(">I4s", png, 33)
+        assert kind == b"IDAT"
+        pixels = np.frombuffer(zlib.decompress(png[41:41 + size]), np.uint8)
+        memory_panel = pixels.reshape(height, 1 + width * 3)[:, 1 + 840 * 3:].reshape(-1, 3)
+        assert (memory_panel == (43, 169, 241)).all(axis=1).any()  # agent position
+        assert (memory_panel == (73, 76, 81)).all(axis=1).any()  # explored grid cells

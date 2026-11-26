@@ -149,6 +149,34 @@ class GridMemory:
         return rgb[::-1].repeat(scale, axis=0).repeat(scale, axis=1)
 
 
+class SensorMemory:
+    """Track an episode's map using the same encoded inputs as the policy."""
+
+    def __init__(self) -> None:
+        self.grid = GridMemory()
+        self.prev_rays: np.ndarray | None = None
+
+    def reset(self) -> None:
+        self.grid.reset()
+        self.prev_rays = None
+
+    @torch.inference_mode()
+    def step(self, encoded: dict[str, np.ndarray], odometry: OdometryNet) -> np.ndarray:
+        rays = encoded["rays"]
+        ents = encoded["ents"]
+        delta = (0.0, 0.0, 0.0)
+        if self.prev_rays is not None:
+            delta = odometry(
+                torch.from_numpy(self.prev_rays)[None], torch.from_numpy(rays)[None],
+                torch.from_numpy(encoded["vitals"][14:17])[None],
+                torch.from_numpy(encoded["prev_action"])[None],
+            )[0].numpy()
+        self.grid.step(rays[:, 0], rays[:, 1:].argmax(axis=-1), ents[:, :5],
+                       ents[:, 5:].argmax(axis=-1), encoded["ent_mask"], delta)
+        self.prev_rays = rays
+        return self.grid.crops()
+
+
 class NakshaMemNet(NakshaNet):
     def __init__(self) -> None:
         super().__init__()

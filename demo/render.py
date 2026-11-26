@@ -37,8 +37,8 @@ def encode_png(rgb: np.ndarray) -> bytes:
             + chunk(b"IDAT", zlib.compress(scanlines, 1)) + chunk(b"IEND", b""))
 
 
-def blank_frame() -> np.ndarray:
-    frame = np.empty((HEIGHT, GAME_WIDTH + MAP_WIDTH, 3), dtype=np.uint8)
+def blank_frame(*, has_memory: bool = False) -> np.ndarray:
+    frame = np.empty((HEIGHT, GAME_WIDTH + MAP_WIDTH * (1 + has_memory), 3), dtype=np.uint8)
     frame[:] = BACKGROUND
     return frame
 
@@ -142,8 +142,16 @@ class AudienceMap:
         panel[top:bottom, left:right][triangle] = (239, 255, 255)
 
 
-def composite(rgb: np.ndarray, audience: AudienceMap) -> np.ndarray:
-    frame = blank_frame()
+def composite(rgb: np.ndarray, audience: AudienceMap, memory_rgb: np.ndarray | None = None) -> np.ndarray:
+    frame = blank_frame(has_memory=memory_rgb is not None)
     frame[:, :GAME_WIDTH] = rgb.repeat(3, axis=0).repeat(3, axis=1)
-    audience.draw(frame[:, GAME_WIDTH:])
+    audience.draw(frame[:, GAME_WIDTH:GAME_WIDTH + MAP_WIDTH])
+    if memory_rgb is not None:
+        height, width = memory_rgb.shape[:2]
+        scale = min(HEIGHT / height, MAP_WIDTH / width)
+        h, w = max(1, round(height * scale)), max(1, round(width * scale))
+        rows, cols = np.arange(h) * height // h, np.arange(w) * width // w
+        top = (HEIGHT - h) // 2
+        left = GAME_WIDTH + MAP_WIDTH + (MAP_WIDTH - w) // 2
+        frame[top:top + h, left:left + w] = memory_rgb[rows[:, None], cols]
     return frame

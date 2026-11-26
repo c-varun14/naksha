@@ -21,6 +21,7 @@ from demo.server import (  # noqa: E402
 
 
 def record(spec: dict, out: Path, weights: Path):
+    """Record the live demo layout, including the sensor map for memory checkpoints."""
     grid = spec["grid"]
     rows = validate_grid(grid)
     states = []

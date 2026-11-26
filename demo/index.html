@@ -27,6 +27,7 @@
     .card { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
     .screen { overflow: hidden; }
     .view-labels { display: grid; grid-template-columns: 4fr 3fr; }
+    .screen.has-memory .view-labels, .screen.has-memory .screen-footer { grid-template-columns: 4fr 3fr 3fr; }
     .view-labels h2 { padding: 9px 14px; }
     .view-labels h2 + h2, .map-hint { border-left: 1px solid var(--border); }
     .viewport { position: relative; }
@@ -93,8 +94,11 @@
 <main>
   <h1><strong>Naksha</strong> · draw a map, watch it play</h1>
   <div class="workbench">
-    <section class="screen card" aria-label="Live episode">
-      <div class="view-labels"><h2>Game view</h2><h2>Audience map</h2></div>
+    <section id="screen" class="screen card" aria-label="Live episode">
+      <div class="view-labels">
+        <h2>Game view</h2><h2>True map (audience view)</h2>
+        <h2 id="memory-label" hidden>Naksha's own map (from its sensors)</h2>
+      </div>
       <div class="viewport">
         <img id="frame" width="840" height="360" alt="First-person game view and top-down map">
         <p id="screen-message">Choose or type a map, then press Play.</p>
@@ -173,6 +177,15 @@
   let frameUrl = null;
   let eventText = '';
   let pollError = false;
+
+  frame.addEventListener('load', () => {
+    const hasMemory = frame.naturalWidth === 1200;
+    byId('screen').classList.toggle('has-memory', hasMemory);
+    byId('memory-label').hidden = !hasMemory;
+    frame.width = frame.naturalWidth;
+    frame.alt = hasMemory ? 'First-person game view, true map, and Naksha’s sensor map' :
+      'First-person game view and true map';
+  });
 
   for (const [name, title] of Object.entries({
     explore: 'Explore', get_key: 'Get key', go_door: 'Go to door', go_exit: 'Go to exit', fight: 'Fight'
