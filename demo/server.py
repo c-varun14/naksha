@@ -47,6 +47,8 @@ def load_maps(path: Path | None) -> list[dict]:
     if path is None:
         return []
     maps = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(maps, list):  # maps without an ASCII grid (e.g. stock WADs) cannot be shown here
+        maps = [spec for spec in maps if isinstance(spec, dict) and isinstance(spec.get("grid"), str)]
     if not isinstance(maps, list) or any(
         not isinstance(spec, dict)
         or any(not isinstance(spec.get(field), str) for field in ("id", "family", "grid"))
