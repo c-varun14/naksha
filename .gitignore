@@ -226,6 +226,6 @@ _vizdoom.ini
 # local run artifacts
 _vizdoom/
 _vizdoom.ini
-data/
-runs/
+/data/
+/runs/
 *.lmp

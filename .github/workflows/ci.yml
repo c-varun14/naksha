@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: astral-sh/setup-uv@v5
+      - name: Install environment (CPU torch, like the evaluation image)
+        run: |
+          uv python install 3.13
+          uv sync --no-group train
+          uv pip install "torch==2.15.0" --index-url https://download.pytorch.org/whl/cpu
+      - name: Tests (organiser wrapper tests, compiler parity, model, agent, rules guard)
+        run: uv run --no-sync pytest -q tests
+      - name: Official validator
+        run: uv run --no-sync python validate.py
