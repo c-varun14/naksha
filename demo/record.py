@@ -1,4 +1,4 @@
-"""Record a headless Naksha episode as numbered PNG frames and JSON telemetry."""
+"""Record a headless Naksha episode as PNG frames, JSON telemetry, and MP4."""
 
 from __future__ import annotations
 
@@ -16,12 +16,12 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from demo.server import (  # noqa: E402
-    DEFAULT_EPISODE_TICKS, FRAME_SKIP, load_maps, play_episode, validate_grid, weights_path, write_map,
+    DEFAULT_EPISODE_TICKS, load_maps, play_episode, validate_grid, weights_path, write_map,
 )
 
 
 def record(spec: dict, out: Path, weights: Path):
-    """Record the live demo layout, including the sensor map for memory checkpoints."""
+    """Record the same composite served by the live demo."""
     grid = spec["grid"]
     rows = validate_grid(grid)
     states = []
@@ -36,15 +36,17 @@ def record(spec: dict, out: Path, weights: Path):
         events = play_episode(wad, rows, spec.get("episode_ticks", DEFAULT_EPISODE_TICKS),
                               weights, publish, seed=spec.get("seed"))
     data = {"id": spec.get("id"), "grid": grid, "outcome": states[-1]["outcome"],
+            "spectator_desync_step": states[-1]["spectator_desync_step"],
             "states": states, "events": events}
     (out / "episode.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg:
         subprocess.run([
-            ffmpeg, "-nostdin", "-y", "-loglevel", "error", "-framerate", f"35/{FRAME_SKIP}",
+            ffmpeg, "-nostdin", "-y", "-loglevel", "error", "-threads", "1", "-framerate", "12",
             "-start_number", "0", "-i", str(out / "frame-%06d.png"), "-frames:v", str(len(states)),
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out / "episode.mp4"),
+            "-c:v", "libx264", "-threads", "1", "-filter_threads", "1", "-pix_fmt", "yuv420p",
+            str(out / "episode.mp4"),
         ], check=True)
     return data
 
@@ -57,6 +59,7 @@ def main():
     parser.add_argument("--maps", type=Path, metavar="FILE")
     parser.add_argument("--out", type=Path, required=True, metavar="DIR")
     parser.add_argument("--weights", type=Path, metavar="PATH")
+    parser.add_argument("--seed", type=int)
     args = parser.parse_args()
     try:
         if args.grid is not None:
@@ -67,6 +70,8 @@ def main():
             spec = next((spec for spec in load_maps(args.maps) if spec["id"] == args.spec_id), None)
             if spec is None:
                 parser.error(f"map ID {args.spec_id!r} was not found in {args.maps}")
+        if args.seed is not None:
+            spec = {**spec, "seed": args.seed}
         data = record(spec, args.out, weights_path(args.weights))
     except (OSError, ValueError, RuntimeError, ViZDoomErrorException, subprocess.CalledProcessError) as exc:
         parser.error(str(exc))

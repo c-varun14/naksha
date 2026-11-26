@@ -19,8 +19,8 @@ if not __package__:
     sys.path.insert(0, str(ROOT))
 
 import training.paths  # noqa: E402, F401
+from demo.hd_env import Lockstep, open_games  # noqa: E402
 from demo.render import AudienceMap, blank_frame, composite, encode_png  # noqa: E402
-from doom_env import make_env  # noqa: E402
 from doom_env.spaces import FRAME_SKIP, VITALS_FIELDS  # noqa: E402
 from doom_env.wrapper import DEFAULT_EPISODE_TICKS  # noqa: E402
 from naksha.actions import NAMES  # noqa: E402
@@ -92,6 +92,7 @@ def initial_state(outcome=None) -> dict:
         "step": 0, "tic": 0, "health": None, "keys": [], "kills": 0,
         "intention": dict.fromkeys(INTENTIONS, 0.0), "exit_vis": 0.0,
         "macro": None, "outcome": outcome, "events": [], "has_memory": False,
+        "latest_event": None, "spectator_desync_step": None,
     }
 
 
@@ -99,24 +100,30 @@ def play_episode(wad, rows, ticks, weights, publish, *, stop=None, speed=None, s
     """Play from official observations and publish rendered frames with audience telemetry."""
     stop = stop if stop is not None else Event()
     os.environ.setdefault("ALSOFT_DRIVERS", "null")
-    env = make_env(wad, "MAP01", episode_ticks=ticks, render_buffers=True)
-    try:
+    with open_games(wad, episode_ticks=ticks) as (env, spectator):
+        games = Lockstep(env, spectator)
         agent = DoomAgent(env.observation_space, env.action_space, "cpu", weights=weights)
         agent.reset()
-        obs, _ = env.reset(seed=seed)
+        obs = games.reset(seed=0 if seed is None else seed)
         audience = AudienceMap(rows)
-        pose = env.privileged_state()
+        pose = games.pose
         audience.observe(pose, obs["rays"])
         door_sectors = pose["door_lock"] >= 0
+        door_locks = pose["door_lock"][door_sectors]
         open_doors = pose["sector_ceiling"][door_sectors] > pose["sector_floor"][door_sectors]
         held = obs["vitals"][8:14] > 0
         events = []
+        latest_event = None
+        if games.desync_step == 0:
+            events.append("spectator desync at step 0")
+            latest_event = "Spectator desync"
         state = initial_state("running")
-        memory_rgb = agent.memory_rgb()
-        has_memory = memory_rgb is not None
-        state.update(tic=pose["tic"], health=int(pose["health"]), kills=pose["kills"], has_memory=has_memory)
+        has_memory = agent.memory_rgb() is not None
+        state.update(tic=pose["tic"], health=int(pose["health"]), kills=pose["kills"],
+                     has_memory=has_memory, events=events.copy(), latest_event=latest_event,
+                     spectator_desync_step=games.desync_step)
         if not stop.is_set():
-            publish(state, encode_png(composite(obs["rgb"], audience, memory_rgb)))
+            publish(state, encode_png(composite(games.frame(obs), audience, state)))
         step = 0
         start = monotonic()
         while not stop.is_set():
@@ -129,8 +136,8 @@ def play_episode(wad, rows, ticks, weights, publish, *, stop=None, speed=None, s
                 if stop.is_set():
                     break
             action = agent.act(obs)
-            obs, _, terminated, truncated, _ = env.step(action)
-            pose = env.privileged_state()
+            obs, terminated, truncated, spectator_finished = games.step(action)
+            pose = games.pose
             finished = terminated or truncated
             # The wrapper repeats the previous observation on the terminal step.
             audience.observe(pose, None if finished else obs["rays"])
@@ -141,22 +148,34 @@ def play_episode(wad, rows, ticks, weights, publish, *, stop=None, speed=None, s
                     color = key.split()[0]
                     audience.pick_up(color[0], pose)
                     events.append(f"picked {color} key at step {step}")
+                    latest_event = f"Got the {color} key!"
             held = new_held
 
             doors = pose["sector_ceiling"][door_sectors] > pose["sector_floor"][door_sectors]
-            events.extend(f"opened door at step {step}" for _ in range(int((doors & ~open_doors).sum())))
+            for lock in door_locks[doors & ~open_doors]:
+                label = "locked door" if lock else "door"
+                events.append(f"opened {label} at step {step}")
+                latest_event = f"{label} open"
             open_doors = doors
 
+            if games.desync_step == step:
+                events.append(f"spectator desync at step {step}")
+                latest_event = "Spectator desync"
             outcome = "running"
             if pose["exit_reached"]:
                 outcome = "exit"
                 events.append(f"exit reached at step {step}")
+                latest_event = "Exit!"
             elif pose["dead"]:
                 outcome = "dead"
                 events.append(f"died at step {step}")
+                latest_event = "Naksha died"
             elif truncated:
                 outcome = "timeout"
                 events.append(f"time ran out at step {step}")
+                latest_event = "Time ran out"
+            elif spectator_finished:
+                outcome = "spectator_desync"
 
             state = {
                 "step": step, "tic": pose["tic"], "health": max(0, int(pose["health"])),
@@ -165,13 +184,12 @@ def play_episode(wad, rows, ticks, weights, publish, *, stop=None, speed=None, s
                 "exit_vis": agent.last_out["exit_vis"],
                 "macro": NAMES[int(agent.last_out["logits"].argmax())],
                 "outcome": outcome, "events": events[-12:], "has_memory": has_memory,
+                "latest_event": latest_event, "spectator_desync_step": games.desync_step,
             }
-            publish(state, encode_png(composite(obs["rgb"], audience, agent.memory_rgb())))
-            if finished:
+            publish(state, encode_png(composite(games.frame(obs), audience, state)))
+            if finished or spectator_finished:
                 break
         return events
-    finally:
-        env.close()
 
 
 class DemoServer(ThreadingHTTPServer):
