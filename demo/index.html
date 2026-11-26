@@ -14,34 +14,40 @@
       --muted: #bac7d6;
       --accent: #7ce0d1;
       --error: #ff9c9f;
-      font: 18px/1.45 system-ui, sans-serif;
+      font: 16px/1.45 system-ui, sans-serif;
     }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--background); color: var(--text); }
-    main { max-width: 1640px; margin: auto; padding: 24px clamp(16px, 3vw, 48px) 32px; }
+    main {
+      display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
+      gap: 10px; height: 100dvh; padding: 10px clamp(8px, 2vw, 28px);
+    }
     h1, h2, p { margin: 0; }
-    h1 { margin-bottom: 18px; font-size: clamp(1.65rem, 3.2vw, 3rem); letter-spacing: -.04em; }
+    h1 { font-size: 1.5rem; letter-spacing: -.035em; }
     h1 strong { color: var(--accent); }
     h2 { font-size: 1.2rem; }
-    .workbench, .telemetry { display: grid; gap: 18px; align-items: start; grid-template-columns: minmax(0, 2fr) minmax(330px, 1fr); }
     .card { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
-    .screen { overflow: hidden; }
-    .view-labels { display: grid; grid-template-columns: 4fr 3fr; }
-    .screen.has-memory .view-labels, .screen.has-memory .screen-footer { grid-template-columns: 4fr 3fr 3fr; }
-    .view-labels h2 { padding: 9px 14px; }
-    .view-labels h2 + h2, .map-hint { border-left: 1px solid var(--border); }
-    .viewport { position: relative; }
-    #frame { display: block; width: 100%; height: auto; image-rendering: pixelated; background: #13181f; }
+    .toolbar { position: relative; display: flex; align-items: center; justify-content: space-between; }
+    summary {
+      cursor: pointer; padding: 6px 12px; border: 1px solid var(--border);
+      border-radius: 7px; background: var(--panel); font-weight: 650;
+    }
+    .editor {
+      position: absolute; z-index: 1; top: calc(100% + 8px); right: 0;
+      width: min(480px, 100%); max-height: calc(100dvh - 175px); overflow: auto;
+      box-shadow: 0 12px 30px #0008;
+    }
+    .viewport { position: relative; overflow: hidden; background: #070b10; }
+    #frame { display: block; width: 100%; height: 100%; object-fit: contain; }
     #screen-message {
       position: absolute; inset: 0; display: grid; place-items: center; padding: 16px;
       background: #0c1016a8; text-align: center; font-size: clamp(1rem, 2.4vw, 1.5rem);
     }
     #screen-message[hidden], [hidden] { display: none; }
-    .screen-footer { display: grid; grid-template-columns: 4fr 3fr; color: var(--muted); }
-    .screen-footer > * { padding: 8px 14px; }
-    .editor, .panel { padding: 14px 16px; }
-    .editor h2, .panel h2 { margin-bottom: 9px; }
-    label { font-weight: 650; }
+    .editor, .panel { padding: 10px 14px; }
+    .panel header { display: flex; align-items: baseline; gap: 4px 16px; flex-wrap: wrap; }
+    label { display: block; font-weight: 650; }
+    #examples { margin-bottom: 10px; }
     textarea, select, button { color: inherit; font: inherit; }
     textarea, select {
       width: 100%; border: 1px solid #536279; border-radius: 6px;
@@ -49,7 +55,7 @@
     }
     label + select, label + textarea { margin-top: 4px; }
     textarea {
-      display: block; min-height: 8em; height: clamp(8em, 18vh, 13em); resize: vertical;
+      display: block; min-height: 5em; height: clamp(5em, 18vh, 13em); resize: vertical;
       white-space: pre; font-family: ui-monospace, monospace; line-height: 1.25; color: #e6f0fb;
     }
     :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
@@ -63,97 +69,60 @@
     }
     button:disabled { opacity: .6; cursor: wait; }
     .error { color: var(--error); margin-top: 8px; font-weight: 650; }
-    .telemetry { margin-top: 18px; }
-    .bars { display: grid; grid-template-columns: max-content minmax(60px, 1fr) 3.6em; gap: 5px 12px; align-items: center; }
-    progress { appearance: none; width: 100%; height: .7rem; border: 0; border-radius: 6px; background: #283647; overflow: hidden; }
-    progress::-webkit-progress-bar { background: #283647; }
-    progress::-webkit-progress-value { background: var(--accent); }
-    progress::-moz-progress-bar { background: var(--accent); }
-    output, .numbers { font-variant-numeric: tabular-nums; }
-    output { text-align: right; }
-    .exit-meter { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
-    .exit-meter progress::-webkit-progress-value { background: #aabaff; }
-    .exit-meter progress::-moz-progress-bar { background: #aabaff; }
-    .chips { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 10px; }
-    .chip { padding: 3px 8px; border: 1px solid #536279; border-radius: 6px; }
-    #events { max-height: 8em; overflow: auto; margin: 4px 0 0; padding-left: 1.35rem; }
+    .numbers { font-variant-numeric: tabular-nums; }
+    #events { max-height: clamp(1.5em, 12dvh, 5.8em); overflow: auto; margin: 4px 0 0; padding-left: 1.35rem; }
     .muted { color: var(--muted); }
-    #outcome {
-      margin-top: 14px; padding: 8px 15px; border: 1px solid currentColor; border-radius: 8px;
-      color: var(--accent); text-align: center; font-size: 1.4rem; font-weight: 750;
-    }
+    #outcome { margin-left: auto; color: var(--accent); font-weight: 750; }
     #outcome[data-result="dead"] { color: var(--error); }
-    #outcome[data-result="timeout"] { color: #ffda86; }
-    @media (max-width: 900px) {
-      .workbench, .telemetry { grid-template-columns: minmax(0, 1fr); gap: 12px; }
-      .telemetry { margin-top: 12px; }
-    }
+    #outcome[data-result="timeout"], #desync { color: #ffda86; }
   </style>
 </head>
 <body>
 <main>
-  <h1><strong>Naksha</strong> · draw a map, watch it play</h1>
-  <div class="workbench">
-    <section id="screen" class="screen card" aria-label="Live episode">
-      <div class="view-labels">
-        <h2>Game view</h2><h2>True map (audience view)</h2>
-        <h2 id="memory-label" hidden>Naksha's own map (from its sensors)</h2>
-      </div>
-      <div class="viewport">
-        <img id="frame" width="840" height="360" alt="First-person game view and top-down map">
-        <p id="screen-message">Choose or type a map, then press Play.</p>
-      </div>
-      <div class="screen-footer">
-        <span id="clock" class="numbers">Step — · Tic —</span>
-        <span class="map-hint">Lighter tiles show where rays reached</span>
-      </div>
-    </section>
-    <form id="editor" class="editor card">
-      <h2>Build a map</h2>
-      <label for="grid">ASCII grid</label>
-      <textarea id="grid" rows="8" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="legend error"></textarea>
-      <p class="legend" id="legend">
-        <span><code>#</code> wall</span><span><code>.</code> floor</span>
-        <span><code>P</code> start</span><span><code>E</code> exit</span>
-        <span><code>D</code> door</span><span><code>R B Y</code> locked doors</span>
-        <span><code>r b y</code> keycards</span><span><code>z s c i d</code> monsters</span>
-        <span><code>h m a k l</code> items</span>
-      </p>
-      <label for="examples">Example map</label>
-      <select id="examples"><option value="">Custom map</option></select>
-      <div class="controls">
-        <div>
-          <label for="speed">Speed</label>
-          <select id="speed">
-            <option value="0.5">0.5×</option><option value="1" selected>1× real time</option>
-            <option value="2">2×</option><option value="4">4×</option>
-          </select>
+  <header class="toolbar">
+    <h1><strong>Naksha</strong></h1>
+    <details id="drawer">
+      <summary>Map controls</summary>
+      <form id="editor" class="editor card">
+        <label for="examples">Example map</label>
+        <select id="examples"><option value="">Custom map</option></select>
+        <label for="grid">ASCII grid</label>
+        <textarea id="grid" rows="8" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="legend error"></textarea>
+        <p class="legend" id="legend">
+          <span><code>#</code> wall</span><span><code>.</code> floor</span>
+          <span><code>P</code> start</span><span><code>E</code> exit</span>
+          <span><code>D</code> door</span><span><code>R B Y</code> locked doors</span>
+          <span><code>r b y</code> keycards</span><span><code>z s c i d</code> monsters</span>
+          <span><code>h m a k l</code> items</span>
+        </p>
+        <div class="controls">
+          <div>
+            <label for="speed">Speed</label>
+            <select id="speed">
+              <option value="0.5">0.5×</option><option value="1" selected>1× real time</option>
+              <option value="2">2×</option><option value="4">4×</option>
+            </select>
+          </div>
+          <button id="play" type="submit">Play</button>
         </div>
-        <button id="play" type="submit">Play</button>
-      </div>
-      <p id="error" class="error" role="alert" hidden></p>
-    </form>
-  </div>
-  <div class="telemetry">
-    <section class="panel card" aria-labelledby="intent-title">
-      <h2 id="intent-title">Intention</h2>
-      <div class="bars" id="intentions"></div>
-      <div class="bars exit-meter">
-        <label for="exit-vis">Exit visible</label>
-        <progress id="exit-vis" max="1" value="0"></progress><output id="exit-value">—</output>
-      </div>
-    </section>
-    <section class="panel card" aria-labelledby="events-title">
-      <div class="chips">
-        <span class="chip" id="health">Health —</span><span class="chip" id="keys">Keys —</span>
-        <span class="chip" id="kills">Kills —</span><span class="chip" id="macro">Move —</span>
-      </div>
+        <p id="error" class="error" role="alert" hidden></p>
+      </form>
+    </details>
+  </header>
+  <section class="viewport card" aria-label="Live episode">
+    <img id="frame" width="1600" height="900" alt="First-person game view, audience map, and episode status">
+    <p id="screen-message">Choose or type a map, then press Play.</p>
+  </section>
+  <section class="panel card" aria-labelledby="events-title">
+    <header>
       <h2 id="events-title">Event log</h2>
-      <p id="empty-log" class="muted">Waiting for events.</p>
-      <ol id="events" hidden></ol>
-    </section>
-  </div>
-  <p id="outcome" role="status" hidden></p>
+      <span id="clock" class="numbers muted">Step — · Tic —</span>
+      <span id="desync" hidden></span>
+      <p id="outcome" role="status" hidden></p>
+    </header>
+    <p id="empty-log" class="muted">Waiting for events.</p>
+    <ol id="events" hidden></ol>
+  </section>
 </main>
 <script>
   const byId = id => document.getElementById(id);
@@ -165,8 +134,9 @@
   const error = byId('error');
   const events = byId('events');
   const outcome = byId('outcome');
-  const meters = new Map();
-  const outcomes = {exit: 'Exit reached', dead: 'Naksha died', timeout: 'Time ran out'};
+  const drawer = byId('drawer');
+  const outcomes = {exit: 'Exit reached', dead: 'Naksha died', timeout: 'Time ran out',
+    spectator_desync: 'Spectator ended early'};
   let maps = [];
   let posting = false;
   let pollInFlight = false;
@@ -178,34 +148,10 @@
   let eventText = '';
   let pollError = false;
 
-  frame.addEventListener('load', () => {
-    const hasMemory = frame.naturalWidth === 1200;
-    byId('screen').classList.toggle('has-memory', hasMemory);
-    byId('memory-label').hidden = !hasMemory;
-    frame.width = frame.naturalWidth;
-    frame.alt = hasMemory ? 'First-person game view, true map, and Naksha’s sensor map' :
-      'First-person game view and true map';
-  });
-
-  for (const [name, title] of Object.entries({
-    explore: 'Explore', get_key: 'Get key', go_door: 'Go to door', go_exit: 'Go to exit', fight: 'Fight'
-  })) {
-    const label = document.createElement('label');
-    const meter = document.createElement('progress');
-    const output = document.createElement('output');
-    meter.id = 'intent-' + name;
-    meter.max = 1;
-    meter.value = 0;
-    label.htmlFor = meter.id;
-    label.textContent = title;
-    output.textContent = '—';
-    byId('intentions').append(label, meter, output);
-    meters.set(name, {meter, output});
-  }
-
   function showError(message) {
     error.textContent = message;
     error.hidden = !message;
+    if (message) drawer.open = true;
   }
 
   async function getJson(path, options) {
@@ -256,7 +202,9 @@
       });
       expectedRun = reply.run_id;
       displayed = '';
-      updateState({outcome: 'running', health: null, keys: [], events: []});
+      drawer.open = false;
+      drawer.querySelector('summary').focus();
+      updateState({outcome: 'running', health: null, events: []});
     } catch (failure) {
       showError(failure.message);
     } finally {
@@ -265,22 +213,12 @@
     }
   });
 
-  function setMeter(meter, output, value, ready) {
-    meter.value = value ?? 0;
-    output.textContent = ready ? Math.round(meter.value * 100) + '%' : '—';
-  }
-
   function updateState(state) {
     const ready = state.health != null;
     byId('clock').textContent = ready ? `Step ${state.step} · Tic ${state.tic}` : 'Step — · Tic —';
-    byId('health').textContent = 'Health ' + (state.health ?? '—');
-    byId('kills').textContent = 'Kills ' + (ready ? state.kills : '—');
-    byId('keys').textContent = 'Keys ' + (ready ? state.keys.join(', ') || 'none' : '—');
-    byId('macro').textContent = 'Move ' + (state.macro?.replaceAll('_', ' ') ?? '—');
-    for (const [name, {meter, output}] of meters) {
-      setMeter(meter, output, state.intention?.[name], Boolean(state.macro));
-    }
-    setMeter(byId('exit-vis'), byId('exit-value'), state.exit_vis, Boolean(state.macro));
+    const desync = byId('desync');
+    desync.hidden = state.spectator_desync_step == null;
+    desync.textContent = desync.hidden ? '' : `Spectator desync · Step ${state.spectator_desync_step}`;
 
     const text = state.events.join('\n');
     if (text !== eventText) {
