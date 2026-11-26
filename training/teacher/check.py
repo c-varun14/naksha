@@ -17,12 +17,16 @@ ROOT = paths.ROOT
 
 
 def run_one(args):
-    family, size, seed, record = args
+    family, size, seed, record, teacher = args
     from doom_env import make_env
     from naksha.actions import to_buttons
     from training.gen.compile import write_map
     from training.gen.families import generate
-    from training.teacher.teacher import Teacher
+
+    if teacher == "v2":
+        from training.teacher.teacher2 import Teacher2 as Teacher
+    else:
+        from training.teacher.teacher import Teacher
 
     spec = generate(family, seed, size)
     wad = write_map(spec["grid"], ROOT / f"data/maps/check/{family}-{size}-{seed}.wad", player_angle=spec["player_angle"])
@@ -54,9 +58,10 @@ def main():
     ap.add_argument("--n", type=int, default=12)
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--procs", type=int, default=11)
+    ap.add_argument("--teacher", choices=("v1", "v2"), default="v1")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
-    tasks = [(f, s, a.start + i, True) for f in a.families for s in a.sizes for i in range(a.n)]
+    tasks = [(f, s, a.start + i, True, a.teacher) for f in a.families for s in a.sizes for i in range(a.n)]
     with mp.get_context("spawn").Pool(a.procs) as pool:
         rows = pool.map(run_one, tasks)
     agg = defaultdict(lambda: defaultdict(float))
