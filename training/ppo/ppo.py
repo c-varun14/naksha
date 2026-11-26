@@ -464,7 +464,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--minutes", required=True, type=float, help="wall-clock budget (0 runs one iteration)")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--steps-per-worker", type=int, default=256)
-    parser.add_argument("--families", nargs="+", choices=(*FAMILIES, "maze", "irregular"), default=FAMILIES)
+    parser.add_argument("--families", nargs="+", choices=(*FAMILIES, "maze", "irregular", "comb", "locksfirst", "ambush"), default=FAMILIES)
     parser.add_argument("--stock-maps", nargs="+", type=str.upper, choices=STOCK_MAPS, default=())
     parser.add_argument("--stock-frac", type=float, default=0.0,
                         help="probability of sampling a stock map at each episode reset")
