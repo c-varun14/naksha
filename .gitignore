@@ -222,3 +222,10 @@ _vizdoom.ini
 
 # Local validator / scorer artifacts
 *.lmp
+
+# local run artifacts
+_vizdoom/
+_vizdoom.ini
+data/
+runs/
+*.lmp
