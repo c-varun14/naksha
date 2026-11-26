@@ -118,3 +118,59 @@ def test_stall_penalty_starts_after_150_steps_without_a_new_cell():
     assert shaped[149] == pytest.approx(-0.0005 - 0.002)
     moved = reward.step(_reward_state(x=64))[0]
     assert moved == pytest.approx(-0.0005 + 0.02)
+
+
+SCORE_GRID = """#######
+#P.i..#
+#.##D##
+#.r.E.#
+#######"""
+
+
+def _score_state(r, c, **over):
+    rows = SCORE_GRID.split("\n")
+    state = {
+        "x": 64 * c + 32, "y": 64 * (len(rows) - 1 - r) + 32, "keys": np.zeros(6), "kills": 0, "health": 100,
+        "damage_taken": 0.0, "exit_reached": False, "dead": False, "tic": 10, "episode_ticks": 2100,
+        "sector_ceiling": np.zeros(4), "sector_floor": np.zeros(4),
+    }
+    return {**state, **over}
+
+
+def test_score_reward_totals_the_judge_map_score():
+    from training.ppo.ppo import ScoreReward
+
+    reward = ScoreReward(_score_state(1, 1), {3: 0}, SCORE_GRID)
+    opened = np.array([0, 0, 0, 64.0])
+    key = np.array([0, 0, 1.0, 0, 0, 0])
+    path = [
+        _score_state(1, 2), _score_state(1, 3, kills=1, damage_taken=30, health=70),
+        _score_state(2, 1, kills=1, damage_taken=30, health=70),
+        _score_state(3, 1, kills=1, damage_taken=30, health=70),
+        _score_state(3, 2, kills=1, damage_taken=30, health=70, keys=key),
+        _score_state(1, 4, kills=1, damage_taken=30, health=70, keys=key, sector_ceiling=opened),
+        _score_state(3, 4, kills=1, damage_taken=30, health=70, keys=key, sector_ceiling=opened,
+                     exit_reached=True, tic=1050),
+    ]
+    for state in path:
+        reward.step(state)
+    rows = SCORE_GRID.split("\n")
+    areas = {(c * 64 // 128, (len(rows) - 1 - r) * 64 // 128)
+             for r, row in enumerate(rows) for c, ch in enumerate(row) if ch != "#"}
+    visited = {((64 * c + 32) // 128, (64 * (len(rows) - 1 - r) + 32) // 128)
+               for r, c in [(1, 1), (1, 2), (1, 3), (2, 1), (3, 1), (3, 2), (1, 4), (3, 4)]} & areas
+    judge = (45 + 5 * 0.70 + 5 * (1 - 1050 / 2100) + 20 * 2 / 2 + 15 * len(visited) / len(areas)
+             + 10 * 1 / 1 - 0.02 * 30)
+    start_area = 15 / len(areas)  # the spawn area is visited before the first step, so it is free
+    assert reward.total == pytest.approx((judge - start_area) / 45)
+
+
+def test_score_reward_charges_early_death_and_loses_the_exit():
+    from training.ppo.ppo import ScoreReward
+
+    early = ScoreReward(_score_state(1, 1), {3: 0}, SCORE_GRID)
+    early.step(_score_state(1, 1, dead=True, health=0, damage_taken=100, tic=100))
+    late = ScoreReward(_score_state(1, 1), {3: 0}, SCORE_GRID)
+    late.step(_score_state(1, 1, dead=True, health=0, damage_taken=100, tic=2000))
+    assert early.total < late.total < 0
+    assert early.total == pytest.approx((-2.0 - 10 * (1 - 100 / 2100)) / 45)

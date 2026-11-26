@@ -58,6 +58,76 @@ def _cell(state: dict) -> tuple[int, int]:
     return int(state["x"] // CELL), int(state["y"] // CELL)
 
 
+class ScoreReward:
+    """Reward = the per-step change in the map score, as the judge suite scores it, divided by 45 (the exit's
+    points), so every trade-off (fight or go, health or kills, explore or exit, key order) is priced the way
+    it is scored and the value function learns when to protect health. Per map: exit 45 plus efficiency
+    5 x health/100 + 5 x time left; progression 20 x (keys + doors opened) / (keys + doors); exploration
+    budget x 128-unit areas visited / reachable areas (budget 15, +20 with no keys or doors, +10 with no
+    monsters); combat 10 x kills / monsters; damage -min(5, 0.02 x damage taken); early death -10 x time
+    left. Generated maps only (the grid gives the totals). Optional stall penalty as in EpisodeReward."""
+
+    MONSTERS, KEY_INDEX, BLOCK, SCALE = "zscid", {"b": 0, "y": 1, "r": 2}, 128, 45.0
+
+    def __init__(self, state: dict, door_locks: dict[int, int], grid: str, *, stall_penalty: float = 0.0) -> None:
+        rows = [r for r in grid.strip("\n").split("\n")]
+        tiles = "".join(rows)
+        self.keys = [self.KEY_INDEX[c] for c in self.KEY_INDEX if c in tiles]
+        self.doors = list(door_locks)
+        self.monsters = sum(tiles.count(c) for c in self.MONSTERS)
+        self.areas = {(c * CELL // self.BLOCK, (len(rows) - 1 - r) * CELL // self.BLOCK)
+                      for r, row in enumerate(rows) for c, ch in enumerate(row) if ch != "#"}
+        items = len(self.keys) + len(self.doors)
+        self.budget = 15 + 20 * (items == 0) + 10 * (self.monsters == 0)
+        self.visited: set[tuple[int, int]] = set()
+        self.opened: set[int] = set()
+        self.stall_penalty = stall_penalty
+        self.stale = 0
+        self.cells = {_cell(state)}
+        self.previous = state
+        self.phi = self._potential(state)
+        self.total = 0.0
+
+    def _potential(self, state: dict) -> float:
+        block = (math.floor(state["x"] / self.BLOCK), math.floor(state["y"] / self.BLOCK))
+        if block in self.areas:
+            self.visited.add(block)
+        if state.get("sector_ceiling") is not None and state.get("sector_floor") is not None:
+            for sector in self.doors:
+                if state["sector_ceiling"][sector] > state["sector_floor"][sector] + 56:
+                    self.opened.add(sector)
+        items = len(self.keys) + len(self.doors)
+        achieved = sum(state["keys"][i] > 0 for i in self.keys) + len(self.opened)
+        points = 20 * achieved / items if items else 0.0
+        points += self.budget * len(self.visited) / max(1, len(self.areas))
+        points += 10 * state["kills"] / self.monsters if self.monsters else 0.0
+        points -= min(5.0, 0.02 * float(state.get("damage_taken", 0.0)))
+        return points / self.SCALE
+
+    def step(self, state: dict) -> tuple[float, int, int]:
+        previous = self.previous
+        phi = self._potential(state)
+        reward = phi - self.phi
+        self.phi = phi
+        ticks = state["episode_ticks"]
+        time_left = max(0, ticks - state["tic"]) / ticks
+        if state["exit_reached"] and not previous["exit_reached"]:
+            reward += (45 + 5 * min(max(0.0, float(state["health"])), 100) / 100 + 5 * time_left) / self.SCALE
+        if state["dead"] and not previous["dead"]:
+            reward -= 10 * time_left / self.SCALE
+        cell = _cell(state)
+        novel = int(cell not in self.cells)
+        self.cells.add(cell)
+        self.stale = 0 if novel else self.stale + 1
+        if self.stall_penalty and self.stale >= EpisodeReward.STALL_STEPS:
+            reward -= self.stall_penalty
+        kills = max(0, state["kills"] - previous["kills"])
+        reward = float(np.clip(reward, -2.0, 2.0))
+        self.total += reward
+        self.previous = state
+        return reward, kills, novel
+
+
 class EpisodeReward:
     """Shaped PPO reward. `survival` adds the official score's survival terms (health bonus at the exit, a
     larger penalty for dying early, double damage cost, healing while hurt); `stall_penalty` is charged per
@@ -178,9 +248,13 @@ class Collector:
                             look_seed=seed if restyle else None)
         self.env = make_env(wad, spec.get("map", "MAP01"), episode_ticks=spec["episode_ticks"], render_buffers=True)
         self.obs, _ = self.env.reset(seed=seed)
-        self.reward = EpisodeReward(self.env.privileged_state(), self.env.mapinfo.door_sectors, stock=self.stock,
-                                    survival=getattr(args, "survival", False),
-                                    stall_penalty=getattr(args, "stall_penalty", 0.0))
+        if getattr(args, "score_reward", False) and not self.stock:
+            self.reward = ScoreReward(self.env.privileged_state(), self.env.mapinfo.door_sectors, spec["grid"],
+                                      stall_penalty=getattr(args, "stall_penalty", 0.0))
+        else:
+            self.reward = EpisodeReward(self.env.privileged_state(), self.env.mapinfo.door_sectors, stock=self.stock,
+                                        survival=getattr(args, "survival", False),
+                                        stall_penalty=getattr(args, "stall_penalty", 0.0))
         self.hidden = self.model.initial_state(1)
         self.prev_action = 0
 
@@ -450,8 +524,9 @@ def train(args: argparse.Namespace) -> dict:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     meta = {"init": str(args.init), "iterations": 0, "steps": 0}
     survival, stall = getattr(args, "survival", False), getattr(args, "stall_penalty", 0.0)
-    if survival or stall:
-        meta["reward"] = {"survival": survival, "stall_penalty": stall}
+    score = getattr(args, "score_reward", False)
+    if survival or stall or score:
+        meta["reward"] = {"survival": survival, "stall_penalty": stall, "score_reward": score}
     deadline = perf_counter() + 60 * args.minutes
     with TemporaryDirectory(prefix="naksha-ppo-") as scratch, log_path.open("w", newline="", encoding="utf-8") as log:
         weights = Path(scratch) / "policy.pt"
@@ -507,6 +582,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                         help="probability that a generated map gets a random appearance (textures, light, ceiling)")
     parser.add_argument("--survival", action="store_true",
                         help="survival reward terms: health bonus at the exit, early-death penalty, 2x damage cost, healing")
+    parser.add_argument("--score-reward", action="store_true",
+                        help="on generated maps, reward = per-step change in the judge-style map score / 45")
     parser.add_argument("--stall-penalty", type=float, default=0.0,
                         help="per-step penalty once 150 steps pass without a new cell")
     parser.add_argument("--seed-offset", type=int, default=300_000)
@@ -533,6 +610,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("stock-frac must be in [0, 1]")
     if not 0 <= args.look_frac <= 1:
         parser.error("look-frac must be in [0, 1]")
+    if args.score_reward and args.survival:
+        parser.error("--score-reward and --survival are alternatives")
     if not (math.isfinite(args.stall_penalty) and args.stall_penalty >= 0):
         parser.error("stall-penalty must be finite and nonnegative")
     if args.stock_frac and not args.stock_maps:
