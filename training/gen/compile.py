@@ -24,6 +24,7 @@ THINGS = {  # char -> (doomednum, default angle)
     "r": (13, 180), "b": (5, 180), "y": (6, 180),  # red / blue / yellow keycards
     "z": (3004, 180), "s": (9, 180), "c": (65, 180), "i": (3001, 180), "d": (3002, 180),
     "h": (2011, 0), "m": (2012, 0), "a": (2018, 0), "k": (2007, 0), "l": (2008, 0),
+    "x": (2035, 0),  # explosive barrel
 }
 LOCKS = {"R": (129, "DOORRED"), "B": (130, "DOORBLU"), "Y": (131, "DOORYEL")}
 DOORS = {"D": (0, "BIGDOOR2"), **LOCKS}
