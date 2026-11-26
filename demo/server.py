@@ -58,6 +58,16 @@ def load_maps(path: Path | None) -> list[dict]:
     return maps
 
 
+def load_showcase(path: Path | None) -> list[dict]:
+    if path is None:
+        return []
+    return [
+        {"id": grid.stem, "family": "showcase", "grid": grid.read_text(encoding="ascii").strip("\n")}
+        for grid in sorted(path.glob("*.txt"))
+        if grid.is_file()
+    ]
+
+
 def validate_grid(grid: str) -> list[str]:
     if not isinstance(grid, str):
         raise GridError("grid must be a string")
@@ -165,9 +175,9 @@ def play_episode(wad, rows, ticks, weights, publish, *, stop=None, speed=None, s
 
 
 class DemoServer(ThreadingHTTPServer):
-    def __init__(self, address=("127.0.0.1", 8765), *, weights=None, maps=None):
+    def __init__(self, address=("127.0.0.1", 8765), *, weights=None, maps=None, showcase=None):
         self.weights = weights
-        self.maps = [*BUILT_INS, *load_maps(maps)]
+        self.maps = [*load_showcase(showcase), *BUILT_INS, *load_maps(maps)]
         self.snapshot_lock = Lock()
         self.run_lock = Lock()
         self.state = initial_state()
@@ -298,9 +308,12 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--weights", type=Path)
     parser.add_argument("--maps", type=Path, help="optional JSON list of example map specs")
+    parser.add_argument("--showcase", type=Path, default=ROOT / "showcase",
+                        help="directory of showcase grids (default: showcase)")
     args = parser.parse_args()
     try:
-        server = DemoServer(("127.0.0.1", args.port), weights=weights_path(args.weights), maps=args.maps)
+        server = DemoServer(("127.0.0.1", args.port), weights=weights_path(args.weights),
+                            maps=args.maps, showcase=args.showcase)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     with server:
