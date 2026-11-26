@@ -14,9 +14,10 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from demo.server import BUILT_INS, DemoServer  # noqa: E402
-from demo.render import AudienceMap, composite, encode_png  # noqa: E402
-from doom_env.spaces import FRAME_SKIP  # noqa: E402
+from demo.hd_env import Lockstep, open_games  # noqa: E402
+from demo.server import BUILT_INS, DemoServer, write_map  # noqa: E402
+from demo.render import ACCENT, AudienceMap, composite, encode_png  # noqa: E402
+from doom_env.spaces import BUTTONS, FRAME_SKIP  # noqa: E402
 from naksha.memory import MEMORY_VERSION, NakshaMemNet  # noqa: E402
 from naksha.model import INTENTIONS, NakshaNet, save_checkpoint  # noqa: E402
 
@@ -48,10 +49,50 @@ def test_composite_shape_and_scaling():
     rgb[0, 1] = (21, 54, 89)
     audience = AudienceMap(BUILT_INS[0]["grid"].splitlines())
     image = composite(rgb, audience)
-    assert image.shape == (360, 840, 3)
+    assert image.shape == (900, 1600, 3)
     assert image.dtype == np.uint8
-    np.testing.assert_array_equal(image[:3, 3:6], np.broadcast_to(rgb[0, 1], (3, 3, 3)))
-    assert len(np.unique(image[:, 480:].reshape(-1, 3), axis=0)) > 3
+    np.testing.assert_array_equal(image[0, 0], (0, 0, 0))
+    np.testing.assert_array_equal(image[0, 7], (10, 27, 44))
+    assert len(np.unique(image[:, 1200:].reshape(-1, 3), axis=0)) > 3
+
+
+def test_showcase_door_spectator_lockstep(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ALSOFT_DRIVERS", "null")
+    grid = (Path(__file__).resolve().parents[2] / "showcase/01-door.txt").read_text()
+    wad = write_map(grid, tmp_path / "door.wad")
+    audience = AudienceMap(grid.splitlines())
+    with open_games(wad, episode_ticks=63 * FRAME_SKIP) as (official, spectator):
+        games = Lockstep(official, spectator)
+        obs = games.reset(seed=0)
+        initial_x = games.pose["x"]
+        action = np.zeros(official.action_space.shape, dtype=np.int8)
+        for step in range(60):
+            action[BUTTONS.index("MOVE_FORWARD")] = step < 10
+            obs, terminated, truncated, spectator_finished = games.step(action)
+            assert not (terminated or truncated or spectator_finished)
+            pose = spectator.privileged_state()
+            assert abs(games.pose["x"] - pose["x"]) <= 0.01
+            assert abs(games.pose["y"] - pose["y"]) <= 0.01
+            assert games.desync_step is None
+            audience.observe(games.pose, obs["rays"])
+        assert games.pose["x"] > initial_x
+        assert obs["rgb"].shape == (120, 160, 3)
+        assert obs["depth"].shape == (120, 160)
+        rgb = games.frame(obs)
+        assert rgb.shape == (480, 640, 3)
+        assert composite(rgb, audience).shape == (900, 1600, 3)
+
+        spectator_pose = spectator.privileged_state
+        with monkeypatch.context() as patch:
+            patch.setattr(spectator, "privileged_state", lambda: {**spectator_pose(), "x": -1})
+            obs, *_ = games.step(action)
+            assert games.desync_step == 61
+            assert games.frame(obs) is obs["rgb"]
+
+        obs, *_ = games.step(action)
+        assert games.desync_step == 61
+        assert games.frame(obs) is obs["rgb"]
 
 
 @pytest.fixture
@@ -81,7 +122,7 @@ def test_run_requires_player_start(serve_demo):
         assert "exactly one P" in json.load(response)["error"]
 
 
-@pytest.mark.parametrize("has_memory", [False, True], ids=["two-panels", "three-panels"])
+@pytest.mark.parametrize("has_memory", [False, True], ids=["feed-forward", "memory"])
 def test_episode_updates_state(serve_demo, tmp_path, has_memory):
     server, url = serve_demo
     server.weights = tmp_path / "random.pt"
@@ -113,15 +154,14 @@ def test_episode_updates_state(serve_demo, tmp_path, has_memory):
     assert 0 <= state["exit_vis"] <= 1
     assert state["macro"]
     assert state["events"]
+    assert state["spectator_desync_step"] is None
     with urlopen(f"{url}/frame.png", timeout=5) as response:
         assert response.headers.get_content_type() == "image/png"
         png = response.read()
     width, height = struct.unpack_from(">II", png, 16)
-    assert (width, height) == (1200 if has_memory else 840, 360)
-    if has_memory:
-        size, kind = struct.unpack_from(">I4s", png, 33)
-        assert kind == b"IDAT"
-        pixels = np.frombuffer(zlib.decompress(png[41:41 + size]), np.uint8)
-        memory_panel = pixels.reshape(height, 1 + width * 3)[:, 1 + 840 * 3:].reshape(-1, 3)
-        assert (memory_panel == (43, 169, 241)).all(axis=1).any()  # agent position
-        assert (memory_panel == (73, 76, 81)).all(axis=1).any()  # explored grid cells
+    assert (width, height) == (1600, 900)
+    size, kind = struct.unpack_from(">I4s", png, 33)
+    assert kind == b"IDAT"
+    pixels = np.frombuffer(zlib.decompress(png[41:41 + size]), np.uint8)
+    panel = pixels.reshape(height, 1 + width * 3)[:, 1 + 1200 * 3:].reshape(-1, 3)
+    assert (panel == ACCENT).all(axis=1).any()
