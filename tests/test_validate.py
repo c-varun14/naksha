@@ -68,3 +68,41 @@ def test_requirements_rules(tmp_path):
     (repo / "submission" / "requirements.txt").write_text("einops==0.8.1\n--find-links https://evil.example\n")
     out = run(repo)
     assert "unsupported line" in out.stdout and out.returncode == 1
+
+
+def test_cpu_and_ram_limits_are_emulated(tmp_path):
+    """The agent runs on one core with single-threaded numeric libraries, and its RAM is measured."""
+    import os
+    import re
+
+    src = (
+        "import os\nimport numpy as np\n"
+        "class DoomAgent:\n"
+        "    def __init__(self, o, a, d):\n"
+        "        assert os.environ['OMP_NUM_THREADS'] == '1'\n"
+        f"        assert len(os.sched_getaffinity(0)) == {1 if len(os.sched_getaffinity(0)) > 1 else len(os.sched_getaffinity(0))}\n"
+        "        self.buf = np.ones(300 * 2**20 // 8)  # 300 MB, touched\n"
+        "        self.a = a\n"
+        "    def reset(self): pass\n"
+        "    def act(self, obs): return self.a.sample()\n"
+    )
+    out = run(make_repo(tmp_path, src))
+    assert out.returncode == 0, out.stdout + out.stderr
+    peak = int(re.search(r"Peak RAM: (\d+) MB", out.stdout).group(1))
+    assert peak >= 300, out.stdout
+
+
+def test_imports_missing_from_image_warn(tmp_path):
+    """pytest is installed here but not in the official image: importing it must warn, unless listed."""
+    src = (
+        "import os, numpy, pytest\nfrom submission_helpers import x  # noqa\n"
+        "class DoomAgent:\n    def __init__(self, o, a, d): self.a = a\n    def reset(self): pass\n"
+        "    def act(self, obs): return self.a.sample()\n"
+    )
+    repo = make_repo(tmp_path, src)
+    (repo / "submission" / "submission_helpers.py").write_text("x = 1\n")
+    out = run(repo)
+    assert "Imports" in out.stdout and "pytest" in out.stdout and "numpy" not in out.stdout.split("Imports")[1].split("\n")[0]
+    (repo / "submission" / "requirements.txt").write_text("pytest==9.2.0\n")
+    out = run(repo)
+    assert "Imports" not in out.stdout, out.stdout

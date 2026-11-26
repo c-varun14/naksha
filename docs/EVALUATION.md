@@ -7,9 +7,14 @@
 
 One NVIDIA RTX 3090 (24 GB) shared by evaluation workers. Each agent gets:
 
-- *(draft)* ≤ **6 GB VRAM**, 16 GB RAM, 4 CPU cores. The VRAM cap is enforced for PyTorch
-  (`torch.cuda.set_per_process_memory_fraction`, applied right after your `__init__` returns) and
-  JAX (`XLA_PYTHON_CLIENT_MEM_FRACTION`); allocating beyond it raises a CUDA out-of-memory error.
+- **2 GB VRAM**. Enforced for PyTorch (`torch.cuda.set_per_process_memory_fraction`, applied
+  right after your `__init__` returns) and JAX (`XLA_PYTHON_CLIENT_MEM_FRACTION`); allocating beyond
+  it raises a CUDA out-of-memory error.
+- **8 GB RAM**, including anything you write to `/tmp` or `/dev/shm` (they are in-memory). Going
+  over it kills your agent (counts as a crash).
+- **1 CPU thread**: your agent gets one CPU's worth of time. `OMP_NUM_THREADS`, `MKL_NUM_THREADS`,
+  `OPENBLAS_NUM_THREADS` are set to 1 and JAX/XLA runs single-threaded on the CPU; extra threads
+  only compete for the same CPU. Do heavy compute on the GPU, or keep CPU models small.
 - No network; repository mounted read-only; writable `/tmp` (2 GB)
 
 ## Which code is evaluated

@@ -61,7 +61,7 @@ def start(tmp_path, variant):
     sock_path = tmp_path / f"{variant}.sock"
     srv = remote.listen(sock_path)
     proc = subprocess.Popen(
-        [sys.executable, "-m", "doom_env.remote", "serve", "--socket", str(sock_path), "--repo", str(repo), "--device", "cpu"],
+        [sys.executable, "-m", "doom_env.remote", "serve", "--socket", remote.address(srv), "--repo", str(repo), "--device", "cpu"],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
     conn = remote.AgentConnection.accept(srv, timeout=20, alive=lambda: proc.poll() is None)
@@ -92,6 +92,12 @@ def test_good_agent_full_episode(tmp_path, env):
             break
     stop(proc, conn, srv)
     assert proc.returncode == 0
+
+
+def test_loopback_tcp_fallback(tmp_path, env, monkeypatch):
+    """Native Windows Python has no AF_UNIX: local tools then talk to the agent over loopback TCP."""
+    monkeypatch.setattr(remote, "HAS_UNIX_SOCKETS", False)
+    test_good_agent_full_episode(tmp_path, env)
 
 
 @pytest.mark.parametrize(

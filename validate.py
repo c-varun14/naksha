@@ -30,6 +30,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 OFFICIAL_IMAGE = os.environ.get("DOOM_IMAGE", "ghcr.io/reinforce-sst/devforge-doom:latest")
+LOCAL_IMAGE = "devforge-doom"  # `docker build -t devforge-doom .` from this repo
 DEFAULT_MAP = "maps/two_rooms.wad"
 DEFAULT_TICKS = 2100
 LARGE_FILE_BYTES = 50 * 1024**2
@@ -148,6 +149,56 @@ def check_requirements(repo: Path) -> None:
         report(OK, "requirements.txt", f"{len(lines)} extra package(s)" if lines else "no extra packages")
 
 
+def _norm(name: str) -> str:
+    import re
+
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def check_imports(repo: Path) -> None:
+    """Warn about packages that submission/ imports and that are installed here, but are neither in
+    the official image (docker/requirements.lock) nor in submission/requirements.txt. A common slip:
+    `uv add something` for local work, then the scorer's environment doesn't have it."""
+    import ast
+    import importlib.metadata as md
+    import re
+
+    lock = ROOT / "docker" / "requirements.lock"
+    if not lock.is_file():
+        return
+    allowed = {_norm(m.group(1)) for m in re.finditer(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==", lock.read_text(), re.M)}
+    allowed |= {"doom-env", "vizdoom", "pip", "setuptools"}
+    req = repo / "submission" / "requirements.txt"
+    if req.is_file():
+        for ln in req.read_text(errors="replace").splitlines():
+            m = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", ln.split("#")[0])
+            if m:
+                allowed.add(_norm(m.group(1)))
+    local = {p.stem if p.suffix == ".py" else p.name for base in (repo / "submission", repo) if base.is_dir()
+             for p in base.iterdir() if p.suffix == ".py" or p.is_dir()}
+    modules: set[str] = set()
+    for path in (repo / "submission").rglob("*.py"):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError:
+            continue  # the interface check reports it
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules |= {a.name.split(".")[0] for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                modules.add(node.module.split(".")[0])
+    dists = md.packages_distributions()
+    missing = {}
+    for mod in sorted(modules - set(sys.stdlib_module_names) - local):
+        names = dists.get(mod)
+        if names and not any(_norm(d) in allowed for d in names):
+            missing[mod] = names[0]
+    if missing:
+        listed = ", ".join(f"{m} ({d}=={md.version(d)})" for m, d in missing.items())
+        report(WARN, "Imports", f"not in the official image or requirements.txt: {listed}. "
+               "Add them to submission/requirements.txt or your agent won't start at evaluation")
+
+
 # --------------------------------------------------------------------------- 2. interface
 def check_interface(repo: Path) -> bool:
     path = repo / "submission" / "agent.py"
@@ -249,6 +300,58 @@ class VramSampler(threading.Thread):
         self._stop.set()
 
 
+class RamSampler(threading.Thread):
+    """Peak resident memory (RSS) of the agent process and its children, from /proc (Linux)."""
+
+    def __init__(self, pid: int):
+        super().__init__(daemon=True)
+        self.pid, self.peak_mb, self._stop = pid, 0, threading.Event()
+        self.supported = Path(f"/proc/{pid}/status").exists()
+
+    @staticmethod
+    def _rss_kb(pid: int) -> int:
+        try:
+            for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+        except (OSError, ValueError, IndexError):
+            pass
+        return 0
+
+    def _tree(self) -> list[int]:
+        children: dict[int, list[int]] = {}
+        for d in Path("/proc").iterdir():
+            if d.name.isdigit():
+                try:
+                    ppid = int((d / "stat").read_text().rsplit(")", 1)[1].split()[1])
+                except (OSError, ValueError, IndexError):
+                    continue
+                children.setdefault(ppid, []).append(int(d.name))
+        out, todo = [], [self.pid]
+        while todo:
+            p = todo.pop()
+            out.append(p)
+            todo += children.get(p, [])
+        return out
+
+    def run(self) -> None:
+        if not self.supported:
+            return
+        while not self._stop.wait(0.25):
+            self.peak_mb = max(self.peak_mb, sum(self._rss_kb(p) for p in self._tree()) // 1024)
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+def one_cpu() -> set[int] | None:
+    """The CPU the agent is pinned to, like the scorer's 1-CPU limit (None if not possible here)."""
+    if not hasattr(os, "sched_getaffinity"):
+        return None
+    cpus = sorted(os.sched_getaffinity(0))
+    return {cpus[-1]} if len(cpus) > 1 else None  # keep the other cores for the game engine
+
+
 def percentile(xs: list[float], q: float) -> float:
     s = sorted(xs)
     return s[min(len(s) - 1, int(q * (len(s) - 1) + 0.5))] if s else 0.0
@@ -263,13 +366,21 @@ def dry_run(repo: Path, device: str, maps: list[str], ticks: int) -> bool:
     log_path = tmp / "agent.log"
     server = remote.listen(sock_path)
     log = open(log_path, "wb")
-    env_vars = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    env_vars = {**os.environ, "PYTHONUNBUFFERED": "1", **L.THREAD_ENV}
+    cpu = one_cpu()
     proc = subprocess.Popen(
-        [sys.executable, "-m", "doom_env.remote", "serve", "--socket", str(sock_path), "--repo", str(repo), "--device", device],
+        [sys.executable, "-m", "doom_env.remote", "serve", "--socket", remote.address(server), "--repo", str(repo), "--device", device],
         stdout=log, stderr=subprocess.STDOUT, env=env_vars, cwd=tmp,
+        preexec_fn=(lambda: os.sched_setaffinity(0, cpu)) if cpu else None,
     )
+    if cpu:
+        report(OK, "CPU limit", f"agent pinned to {L.CPU_THREADS} CPU (core {min(cpu)}), like the evaluation sandbox")
+    else:
+        report(WARN, "CPU limit", f"could not pin the agent to {L.CPU_THREADS} CPU here; evaluation gives it one CPU, so timings may look better than they will be")
     vram = VramSampler(proc.pid)
     vram.start()
+    ram = RamSampler(proc.pid)
+    ram.start()
     ok = True
     conn = None
     resolved_device = device
@@ -335,7 +446,13 @@ def dry_run(repo: Path, device: str, maps: list[str], ticks: int) -> bool:
             proc.kill()
             proc.wait()
         vram.stop()
+        ram.stop()
         log.close()
+    if ram.supported and ram.peak_mb:
+        status = FAIL if ram.peak_mb > L.MAX_RAM_MB else (WARN if ram.peak_mb > 0.8 * L.MAX_RAM_MB else OK)
+        report(status, "Peak RAM", f"{ram.peak_mb} MB resident (limit {L.MAX_RAM_MB} MB, including files written to /tmp)")
+    else:
+        report(WARN, "Peak RAM", f"could not be measured here (needs Linux /proc); the limit is {L.MAX_RAM_MB} MB")
     if vram.supported and vram.peak:
         report(OK if vram.peak <= L.MAX_VRAM_MB else FAIL, "Peak GPU memory", f"{vram.peak} MB (limit {L.MAX_VRAM_MB} MB)")
     elif vram.peak_total > 0 and resolved_device != "cpu":
@@ -352,11 +469,35 @@ def dry_run(repo: Path, device: str, maps: list[str], ticks: int) -> bool:
 
 
 # --------------------------------------------------------------------------- docker
+def _have_image(image: str) -> bool:
+    return subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode == 0
+
+
+def resolve_image(image: str, explicit: bool) -> str | None:
+    """The image to validate in: present locally, else pulled. Without --image, a locally built
+    `devforge-doom` is used when the official image can't be found."""
+    if _have_image(image):
+        return image
+    if not explicit and _have_image(LOCAL_IMAGE):
+        print(f"(using the locally built image '{LOCAL_IMAGE}'; {image} is not available here)", flush=True)
+        return LOCAL_IMAGE
+    print(f"$ docker pull {image}", flush=True)
+    if subprocess.call(["docker", "pull", image]) == 0:
+        return image
+    print(f"\nThe image {image} is not available. Build it from this repository instead:\n"
+          f"    docker build -t {LOCAL_IMAGE} .\n"
+          f"    python validate.py --docker --image {LOCAL_IMAGE}", file=sys.stderr)
+    return None
+
+
 def run_in_docker(repo: Path, image: str, gpus: bool, maps: list[str], ticks: int) -> int:
     """Like the scorer: requirements.txt installed with network into a separate dir, then the agent
     runs with no network, a read-only filesystem and the repo mounted read-only."""
     if not shutil.which("docker"):
         print("docker not found. Install Docker or run without --docker.", file=sys.stderr)
+        return 2
+    image = resolve_image(image, explicit=image != OFFICIAL_IMAGE)
+    if image is None:
         return 2
     work = Path(tempfile.mkdtemp(prefix="doom-validate-docker-"))
     deps = work / "deps"
@@ -372,9 +513,19 @@ def run_in_docker(repo: Path, image: str, gpus: bool, maps: list[str], ticks: in
             if subprocess.call(install) != 0:
                 report(FAIL, "requirements.txt", "installing it in the official image failed (see output above)")
                 return 1
+        # The agent's RAM and CPU limits are checked inside (peak RSS, pinned to one core). The
+        # container also runs this validator and the game engine, hence the extra memory and no --cpus.
+        try:
+            from doom_env.limits import MAX_RAM_MB
+        except ImportError:  # --docker on a host without doom_env installed
+            MAX_RAM_MB = 8192
+        mem = f"{MAX_RAM_MB + 2048}m"
         cmd = [
             "docker", "run", "--rm", *user, "--network", "none", "--read-only",
-            "--tmpfs", "/tmp:exec,size=2g", "-e", "HOME=/tmp", "-e", "PYTHONPATH=/deps", "-w", "/tmp",
+            "--memory", mem, "--memory-swap", mem, "--pids-limit", "512",
+            "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+            "--tmpfs", "/tmp:exec,size=2g", "--shm-size", "2g",
+            "-e", "HOME=/tmp", "-e", "PYTHONPATH=/deps", "-w", "/tmp",
             "-v", f"{repo}:/submission:ro", "-v", f"{deps}:/deps:ro",
             "-v", f"{ROOT / 'validate.py'}:/validator/validate.py:ro",
         ]
@@ -410,6 +561,8 @@ def main() -> int:
     ap.add_argument("--in-docker", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
     repo = Path(args.repo).resolve()
+    if os.name == "nt":
+        os.system("")  # enables ANSI colours in the classic Windows console
 
     if args.docker:
         try:
@@ -432,6 +585,8 @@ def main() -> int:
     if not args.in_docker:
         check_size(repo, limits.MAX_REPO_BYTES)
     check_requirements(repo)
+    if not args.in_docker:
+        check_imports(repo)
     if check_interface(repo):
         dry_run(repo, args.device, args.maps or [DEFAULT_MAP], args.ticks)
 

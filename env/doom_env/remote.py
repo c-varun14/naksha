@@ -154,7 +154,18 @@ def _recv_message(sock: socket.socket, deadline: float | None, max_payload: int)
 
 
 # --------------------------------------------------------------------------- host side
+# Unix sockets everywhere except native Windows Python, which lacks AF_UNIX. There, local tools
+# (validate.py) fall back to loopback TCP. The scorer always runs on Linux with Unix sockets.
+HAS_UNIX_SOCKETS = hasattr(socket, "AF_UNIX")
+
+
 def listen(path: str | os.PathLike) -> socket.socket:
+    """Listening socket for one agent. Pass `address(server)` to `serve --socket`."""
+    if not HAS_UNIX_SOCKETS:
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        return srv
     path = str(path)
     if os.path.exists(path):
         os.unlink(path)
@@ -163,6 +174,36 @@ def listen(path: str | os.PathLike) -> socket.socket:
     os.chmod(path, 0o666)  # the sandboxed agent may run as a different uid
     srv.listen(1)
     return srv
+
+
+def address(server: socket.socket) -> str:
+    """What the agent process connects to: a socket path, or tcp:127.0.0.1:<port>."""
+    if server.family == socket.AF_INET:
+        host, port = server.getsockname()[:2]
+        return f"tcp:{host}:{port}"
+    return str(server.getsockname())
+
+
+def _connect(addr: str) -> socket.socket:
+    if addr.startswith("tcp:"):
+        host, _, port = addr[4:].rpartition(":")
+        if host not in ("127.0.0.1", "localhost"):
+            raise ValueError("agent sockets are local only")
+        sock = socket.create_connection((host, int(port)), timeout=5)
+        sock.settimeout(None)
+        return sock
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(addr)
+    except OSError:
+        sock.close()
+        raise
+    return sock
+
+
+def _nodelay(sock: socket.socket) -> None:
+    if sock.family == socket.AF_INET:  # no Nagle delays on small replies
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
 
 def validate_action(action, action_space=None) -> np.ndarray:
@@ -194,6 +235,8 @@ class AgentConnection:
             server.settimeout(min(0.2, remaining))
             try:
                 conn, _ = server.accept()
+                conn.settimeout(None)
+                _nodelay(conn)
                 return cls(conn)
             except socket.timeout:
                 if not alive():
@@ -320,17 +363,22 @@ def _error(where: str, exc: BaseException) -> tuple[dict, None]:
 
 def serve(socket_path: str, repo: str, device: str = "auto") -> int:
     from . import CONTRACT_VERSION
+    from .limits import THREAD_ENV
 
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    # One CPU per agent: libraries loaded from here on (torch, jax, ...) start a single compute
+    # thread. The scorer and validate.py also set these before this process starts (for numpy).
+    os.environ.update(THREAD_ENV)
+
     for _ in range(100):
         try:
-            sock.connect(socket_path)
+            sock = _connect(socket_path)
             break
         except (FileNotFoundError, ConnectionRefusedError):
             time.sleep(0.05)
     else:
         print(f"could not connect to {socket_path}", file=sys.stderr)
         return 2
+    _nodelay(sock)
 
     agent = None
     repo_path = Path(repo).resolve()
