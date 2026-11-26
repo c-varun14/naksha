@@ -2,6 +2,7 @@
 
 from contextlib import ExitStack, contextmanager
 import logging
+from pathlib import Path
 from types import FunctionType, SimpleNamespace
 
 import vizdoom as vd
@@ -16,23 +17,50 @@ class _HDGame(vd.DoomGame):
         super().set_screen_resolution(vd.ScreenResolution.RES_640X480)
 
 
-class HDDoomEnv(DoomEnv):
+class _IWADGame(vd.DoomGame):
+    def set_doom_scenario_path(self, path):
+        # A standalone IWAD replaces the base game instead of overlaying it.
+        self.set_doom_game_path(path)
+
+
+class _HDIWADGame(_HDGame, _IWADGame):
+    pass
+
+
+def _constructor(game_type):
     # The official constructor has no game factory hook. Give it a private
     # ViZDoom binding so all its settings and initialization order stay intact.
-    __init__ = FunctionType(
+    init = FunctionType(
         DoomEnv.__init__.__code__,
-        {**DoomEnv.__init__.__globals__, "vd": SimpleNamespace(**(vars(vd) | {"DoomGame": _HDGame}))},
+        {**DoomEnv.__init__.__globals__, "vd": SimpleNamespace(**(vars(vd) | {"DoomGame": game_type}))},
         argdefs=DoomEnv.__init__.__defaults__,
     )
-    __init__.__kwdefaults__ = DoomEnv.__init__.__kwdefaults__
+    init.__kwdefaults__ = DoomEnv.__init__.__kwdefaults__
+    return init
+
+
+class HDDoomEnv(DoomEnv):
+    __init__ = _constructor(_HDGame)
+
+
+class _IWADDoomEnv(DoomEnv):
+    __init__ = _constructor(_IWADGame)
+
+
+class _HDIWADDoomEnv(DoomEnv):
+    __init__ = _constructor(_HDIWADGame)
 
 
 @contextmanager
 def open_games(wad, map_name="MAP01", *, episode_ticks):
+    with Path(wad).open("rb") as source:
+        is_iwad = source.read(4) == b"IWAD"
+    official_type = _IWADDoomEnv if is_iwad else make_env
+    spectator_type = _HDIWADDoomEnv if is_iwad else HDDoomEnv
     with ExitStack() as stack:
-        official = make_env(wad, map_name, episode_ticks=episode_ticks, render_buffers=True)
+        official = official_type(wad, map_name, episode_ticks=episode_ticks, render_buffers=True)
         stack.callback(official.close)
-        spectator = HDDoomEnv(wad, map_name, episode_ticks=episode_ticks, render_buffers=True)
+        spectator = spectator_type(wad, map_name, episode_ticks=episode_ticks, render_buffers=True)
         stack.callback(spectator.close)
         yield official, spectator
 
