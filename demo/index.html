@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Naksha · draw a map, watch it play</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --background: #0c1016;
+      --panel: #141b24;
+      --border: #344252;
+      --text: #f1f5fb;
+      --muted: #bac7d6;
+      --accent: #7ce0d1;
+      --error: #ff9c9f;
+      font: 18px/1.45 system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--background); color: var(--text); }
+    main { max-width: 1640px; margin: auto; padding: 24px clamp(16px, 3vw, 48px) 32px; }
+    h1, h2, p { margin: 0; }
+    h1 { margin-bottom: 18px; font-size: clamp(1.65rem, 3.2vw, 3rem); letter-spacing: -.04em; }
+    h1 strong { color: var(--accent); }
+    h2 { font-size: 1.2rem; }
+    .workbench, .telemetry { display: grid; gap: 18px; align-items: start; grid-template-columns: minmax(0, 2fr) minmax(330px, 1fr); }
+    .card { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+    .screen { overflow: hidden; }
+    .view-labels { display: grid; grid-template-columns: 4fr 3fr; }
+    .view-labels h2 { padding: 9px 14px; }
+    .view-labels h2 + h2, .map-hint { border-left: 1px solid var(--border); }
+    .viewport { position: relative; }
+    #frame { display: block; width: 100%; height: auto; image-rendering: pixelated; background: #13181f; }
+    #screen-message {
+      position: absolute; inset: 0; display: grid; place-items: center; padding: 16px;
+      background: #0c1016a8; text-align: center; font-size: clamp(1rem, 2.4vw, 1.5rem);
+    }
+    #screen-message[hidden], [hidden] { display: none; }
+    .screen-footer { display: grid; grid-template-columns: 4fr 3fr; color: var(--muted); }
+    .screen-footer > * { padding: 8px 14px; }
+    .editor, .panel { padding: 14px 16px; }
+    .editor h2, .panel h2 { margin-bottom: 9px; }
+    label { font-weight: 650; }
+    textarea, select, button { color: inherit; font: inherit; }
+    textarea, select {
+      width: 100%; border: 1px solid #536279; border-radius: 6px;
+      padding: 6px 9px; background: #0c1119;
+    }
+    label + select, label + textarea { margin-top: 4px; }
+    textarea {
+      display: block; min-height: 8em; height: clamp(8em, 18vh, 13em); resize: vertical;
+      white-space: pre; font-family: ui-monospace, monospace; line-height: 1.25; color: #e6f0fb;
+    }
+    :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+    .legend { display: flex; gap: 4px 12px; flex-wrap: wrap; margin: 8px 0 12px; color: var(--muted); font-size: .85rem; }
+    .legend span { display: inline-block; }
+    .legend code { color: var(--text); font-size: 1em; font-weight: bold; }
+    .controls { display: grid; grid-template-columns: 1fr 1.25fr; gap: 12px; align-items: end; margin-top: 10px; }
+    button {
+      min-height: 46px; padding: 4px 14px; border: none; border-radius: 7px;
+      background: var(--accent); color: #092420; font-size: 1.2rem; font-weight: 800; cursor: pointer;
+    }
+    button:disabled { opacity: .6; cursor: wait; }
+    .error { color: var(--error); margin-top: 8px; font-weight: 650; }
+    .telemetry { margin-top: 18px; }
+    .bars { display: grid; grid-template-columns: max-content minmax(60px, 1fr) 3.6em; gap: 5px 12px; align-items: center; }
+    progress { appearance: none; width: 100%; height: .7rem; border: 0; border-radius: 6px; background: #283647; overflow: hidden; }
+    progress::-webkit-progress-bar { background: #283647; }
+    progress::-webkit-progress-value { background: var(--accent); }
+    progress::-moz-progress-bar { background: var(--accent); }
+    output, .numbers { font-variant-numeric: tabular-nums; }
+    output { text-align: right; }
+    .exit-meter { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+    .exit-meter progress::-webkit-progress-value { background: #aabaff; }
+    .exit-meter progress::-moz-progress-bar { background: #aabaff; }
+    .chips { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 10px; }
+    .chip { padding: 3px 8px; border: 1px solid #536279; border-radius: 6px; }
+    #events { max-height: 8em; overflow: auto; margin: 4px 0 0; padding-left: 1.35rem; }
+    .muted { color: var(--muted); }
+    #outcome {
+      margin-top: 14px; padding: 8px 15px; border: 1px solid currentColor; border-radius: 8px;
+      color: var(--accent); text-align: center; font-size: 1.4rem; font-weight: 750;
+    }
+    #outcome[data-result="dead"] { color: var(--error); }
+    #outcome[data-result="timeout"] { color: #ffda86; }
+    @media (max-width: 900px) {
+      .workbench, .telemetry { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+      .telemetry { margin-top: 12px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1><strong>Naksha</strong> · draw a map, watch it play</h1>
+  <div class="workbench">
+    <section class="screen card" aria-label="Live episode">
+      <div class="view-labels"><h2>Game view</h2><h2>Audience map</h2></div>
+      <div class="viewport">
+        <img id="frame" width="840" height="360" alt="First-person game view and top-down map">
+        <p id="screen-message">Choose or type a map, then press Play.</p>
+      </div>
+      <div class="screen-footer">
+        <span id="clock" class="numbers">Step — · Tic —</span>
+        <span class="map-hint">Lighter tiles show where rays reached</span>
+      </div>
+    </section>
+    <form id="editor" class="editor card">
+      <h2>Build a map</h2>
+      <label for="grid">ASCII grid</label>
+      <textarea id="grid" rows="8" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="legend error"></textarea>
+      <p class="legend" id="legend">
+        <span><code>#</code> wall</span><span><code>.</code> floor</span>
+        <span><code>P</code> start</span><span><code>E</code> exit</span>
+        <span><code>D</code> door</span><span><code>R B Y</code> locked doors</span>
+        <span><code>r b y</code> keycards</span><span><code>z s c i d</code> monsters</span>
+        <span><code>h m a k l</code> items</span>
+      </p>
+      <label for="examples">Example map</label>
+      <select id="examples"><option value="">Custom map</option></select>
+      <div class="controls">
+        <div>
+          <label for="speed">Speed</label>
+          <select id="speed">
+            <option value="0.5">0.5×</option><option value="1" selected>1× real time</option>
+            <option value="2">2×</option><option value="4">4×</option>
+          </select>
+        </div>
+        <button id="play" type="submit">Play</button>
+      </div>
+      <p id="error" class="error" role="alert" hidden></p>
+    </form>
+  </div>
+  <div class="telemetry">
+    <section class="panel card" aria-labelledby="intent-title">
+      <h2 id="intent-title">Intention</h2>
+      <div class="bars" id="intentions"></div>
+      <div class="bars exit-meter">
+        <label for="exit-vis">Exit visible</label>
+        <progress id="exit-vis" max="1" value="0"></progress><output id="exit-value">—</output>
+      </div>
+    </section>
+    <section class="panel card" aria-labelledby="events-title">
+      <div class="chips">
+        <span class="chip" id="health">Health —</span><span class="chip" id="keys">Keys —</span>
+        <span class="chip" id="kills">Kills —</span><span class="chip" id="macro">Move —</span>
+      </div>
+      <h2 id="events-title">Event log</h2>
+      <p id="empty-log" class="muted">Waiting for events.</p>
+      <ol id="events" hidden></ol>
+    </section>
+  </div>
+  <p id="outcome" role="status" hidden></p>
+</main>
+<script>
+  const byId = id => document.getElementById(id);
+  const form = byId('editor');
+  const grid = byId('grid');
+  const examples = byId('examples');
+  const frame = byId('frame');
+  const screenMessage = byId('screen-message');
+  const error = byId('error');
+  const events = byId('events');
+  const outcome = byId('outcome');
+  const meters = new Map();
+  const outcomes = {exit: 'Exit reached', dead: 'Naksha died', timeout: 'Time ran out'};
+  let maps = [];
+  let posting = false;
+  let pollInFlight = false;
+  let requestEpoch = 0;
+  let expectedRun = null;
+  let lastPoll = -100;
+  let displayed = '';
+  let frameUrl = null;
+  let eventText = '';
+  let pollError = false;
+
+  for (const [name, title] of Object.entries({
+    explore: 'Explore', get_key: 'Get key', go_door: 'Go to door', go_exit: 'Go to exit', fight: 'Fight'
+  })) {
+    const label = document.createElement('label');
+    const meter = document.createElement('progress');
+    const output = document.createElement('output');
+    meter.id = 'intent-' + name;
+    meter.max = 1;
+    meter.value = 0;
+    label.htmlFor = meter.id;
+    label.textContent = title;
+    output.textContent = '—';
+    byId('intentions').append(label, meter, output);
+    meters.set(name, {meter, output});
+  }
+
+  function showError(message) {
+    error.textContent = message;
+    error.hidden = !message;
+  }
+
+  async function getJson(path, options) {
+    const response = await fetch(path, {cache: 'no-store', ...options});
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || 'The server could not complete the request.');
+    return body;
+  }
+
+  async function loadMaps() {
+    try {
+      maps = await getJson('/maps');
+      maps.forEach((spec, index) => {
+        const option = new Option(spec.id + ' · ' + spec.family, String(index));
+        examples.add(option);
+      });
+      if (maps.length && !grid.value) {
+        examples.value = '0';
+        grid.value = maps[0].grid;
+      }
+    } catch (failure) {
+      showError('Could not load example maps. ' + failure.message);
+    }
+  }
+
+  examples.addEventListener('change', () => {
+    if (examples.value !== '') grid.value = maps[Number(examples.value)].grid;
+    showError('');
+  });
+  grid.addEventListener('input', () => {
+    if (examples.value !== '' && grid.value !== maps[Number(examples.value)].grid) examples.value = '';
+    showError('');
+  });
+
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (posting) return;
+    posting = true;
+    requestEpoch++;
+    byId('play').disabled = true;
+    pollError = false;
+    showError('');
+    try {
+      const reply = await getJson('/run', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({grid: grid.value, speed: Number(byId('speed').value)})
+      });
+      expectedRun = reply.run_id;
+      displayed = '';
+      updateState({outcome: 'running', health: null, keys: [], events: []});
+    } catch (failure) {
+      showError(failure.message);
+    } finally {
+      posting = false;
+      byId('play').disabled = false;
+    }
+  });
+
+  function setMeter(meter, output, value, ready) {
+    meter.value = value ?? 0;
+    output.textContent = ready ? Math.round(meter.value * 100) + '%' : '—';
+  }
+
+  function updateState(state) {
+    const ready = state.health != null;
+    byId('clock').textContent = ready ? `Step ${state.step} · Tic ${state.tic}` : 'Step — · Tic —';
+    byId('health').textContent = 'Health ' + (state.health ?? '—');
+    byId('kills').textContent = 'Kills ' + (ready ? state.kills : '—');
+    byId('keys').textContent = 'Keys ' + (ready ? state.keys.join(', ') || 'none' : '—');
+    byId('macro').textContent = 'Move ' + (state.macro?.replaceAll('_', ' ') ?? '—');
+    for (const [name, {meter, output}] of meters) {
+      setMeter(meter, output, state.intention?.[name], Boolean(state.macro));
+    }
+    setMeter(byId('exit-vis'), byId('exit-value'), state.exit_vis, Boolean(state.macro));
+
+    const text = state.events.join('\n');
+    if (text !== eventText) {
+      eventText = text;
+      events.replaceChildren(...state.events.map(message => {
+        const item = document.createElement('li');
+        item.textContent = message;
+        return item;
+      }));
+      events.scrollTop = events.scrollHeight;
+    }
+    byId('empty-log').hidden = state.events.length > 0;
+    events.hidden = !state.events.length;
+    const result = outcomes[state.outcome] || '';
+    if (outcome.textContent !== result) outcome.textContent = result;
+    outcome.dataset.result = state.outcome || '';
+    outcome.hidden = !result;
+    screenMessage.hidden = ready;
+    if (!ready) {
+      screenMessage.textContent = state.error ? 'Episode unavailable.' :
+        state.outcome === 'running' ? 'Starting episode…' : 'Choose or type a map, then press Play.';
+    }
+  }
+
+  async function poll() {
+    const epoch = requestEpoch;
+    try {
+      const state = await getJson('/state');
+      if (epoch !== requestEpoch || (expectedRun !== null && state.run_id < expectedRun)) return;
+      if (pollError) {
+        showError('');
+        pollError = false;
+      }
+      const marker = JSON.stringify([state.run_id, state.step, state.health, state.outcome, state.error]);
+      if (displayed === marker) return;
+
+      const response = await fetch('/frame.png', {cache: 'no-store'});
+      if (!response.ok) throw new Error('Could not load the live frame.');
+      const blob = await response.blob();
+      if (epoch !== requestEpoch) return;
+      const previousUrl = frameUrl;
+      frameUrl = URL.createObjectURL(blob);
+      frame.src = frameUrl;
+      if (previousUrl) URL.revokeObjectURL(previousUrl);
+      displayed = marker;
+      updateState(state);
+      if (state.error) showError(state.error);
+    } catch (failure) {
+      if (epoch === requestEpoch && !error.textContent) {
+        showError(failure.message);
+        pollError = true;
+      }
+    } finally {
+      pollInFlight = false;
+    }
+  }
+
+  function refresh(now) {
+    if (!posting && !pollInFlight && now - lastPoll >= 100) {
+      lastPoll = now;
+      pollInFlight = true;
+      void poll();
+    }
+    requestAnimationFrame(refresh);
+  }
+
+  void loadMaps();
+  requestAnimationFrame(refresh);
+</script>
+</body>
+</html>
