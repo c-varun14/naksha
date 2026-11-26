@@ -64,3 +64,14 @@ def test_new_family_sizes_compile_and_are_solvable(tmp_path, family, size, maze_
             assert len(spec["locks"]) <= 2
             assert set(spec["locks"]) == set(spec["grid"]) & set("RBY")
         assert write_map(spec["grid"], tmp_path / "test.wad", player_angle=spec["player_angle"]).is_file()
+
+
+def test_maze_sides_override_makes_smaller_mazes(monkeypatch):
+    from training.gen import families
+
+    monkeypatch.setattr(families, "MAZE_SIDES", {"s": 7, "m": 9, "l": 11})
+    for size, side in (("s", 7), ("m", 9), ("l", 11)):
+        spec = families.generate("maze", 62000, size)
+        rows = spec["grid"].split("\n")
+        assert spec["rooms"] == side ** 2
+        assert len(rows) in (2 * side + 1, 3 * side + 1)

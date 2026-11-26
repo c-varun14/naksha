@@ -30,6 +30,7 @@ from naksha.features import KEYS, SHAPES, encode
 from naksha.model import NakshaNet, load_checkpoint, save_checkpoint
 from training.eval.stock import STOCK_MAPS, build_specs
 from training.gen.compile import CELL, write_map
+from training.gen import families
 from training.gen.families import generate
 
 FAMILIES = ("arena", "rooms", "locks", "gauntlet")
@@ -147,6 +148,9 @@ class Collector:
         else:
             family = args.families[(self.worker + k) % len(args.families)]
             size = args.sizes[(self.worker + k // len(args.families)) % len(args.sizes)]
+            sides = getattr(args, "maze_sides", None)
+            if sides:
+                families.MAZE_SIDES = dict(zip(SIZES, sides))
             spec = generate(family, seed, size)
             restyle = random.Random(seed + 7_919).random() < getattr(args, "look_frac", 0.0)
             wad = write_map(spec["grid"], "map.wad", player_angle=spec["player_angle"],
@@ -471,6 +475,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--stock-frac", type=float, default=0.0,
                         help="probability of sampling a stock map at each episode reset")
     parser.add_argument("--sizes", nargs="+", choices=SIZES, default=SIZES)
+    parser.add_argument("--maze-sides", nargs=3, type=int, metavar=("S", "M", "L"),
+                        help="maze lattice side per size (default 15 25 35)")
     parser.add_argument("--look-frac", type=float, default=0.0,
                         help="probability that a generated map gets a random appearance (textures, light, ceiling)")
     parser.add_argument("--seed-offset", type=int, default=300_000)

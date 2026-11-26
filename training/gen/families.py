@@ -154,6 +154,10 @@ def _exit_cell(lay, room, g, rng):
     return rng.choice(cand or _free_cells(lay, room, g))
 
 
+# Maze side (cells per row of the lattice) for each size. PPO can override it with --maze-sides.
+MAZE_SIDES = {"s": 15, "m": 25, "l": 35}
+
+
 def generate(family: str, seed: int, size: str = "m") -> dict:
     """Return a map spec dict (see INTERFACES §5 minus wad path)."""
     for attempt in range(50):
@@ -186,7 +190,7 @@ def _generate(family, rng, size):
     if family == "ambush":
         return _ambush(rng, size)
     if family == "maze":
-        return _maze(rng, {"s": 15, "m": 25, "l": 35}[size])
+        return _maze(rng, MAZE_SIDES[size])
     if family == "irregular":
         return _irregular(rng, {"s": 3, "m": 4, "l": 5}[size])
 
