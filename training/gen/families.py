@@ -1,4 +1,4 @@
-"""Procedural map families on a room lattice, emitted as ASCII grids for compile.py.
+"""Procedural map families emitted as ASCII grids for compile.py.
 
 arena    (tier 1): one or two large rooms, several monsters, items
 rooms    (tier 2): room lattice with doors, openings, dead ends and loops
@@ -6,6 +6,9 @@ locks    (tier 3): rooms + 1-3 locked doors on the start->exit path, keys hidden
 gauntlet (tier 4): locks + more monsters and scarcer items
 maze: large DFS maze with narrow corridors
 irregular: L, U and plus-shaped rooms joined by corridors
+comb: a corridor with many individually doored side rooms
+locksfirst: reverse-order corridor locks or a hub with key spokes
+ambush: tight corridors with monster alcoves and optional close-range demons
 
 Every map is checked for key-aware solvability before it is returned.
 """
@@ -26,7 +29,7 @@ DOORS = set("DRBY")
 @dataclass
 class Layout:
     grid: list[list[str]]
-    rooms: dict  # (i, j) -> (r0, c0, r1, c1) interior bounds, inclusive
+    rooms: dict  # room id -> (r0, c0, r1, c1) interior bounds, inclusive
     edges: list = field(default_factory=list)  # ((i,j),(i2,j2), (r,c) opening cell, kind)
 
 
@@ -161,8 +164,13 @@ def generate(family: str, seed: int, size: str = "m") -> dict:
             continue
         rows = ["".join(r) for r in grid]
         if solvable(rows):
+            if family == "locksfirst" and any(
+                solvable([row.replace(KEY_OF[lock], ".") for row in rows]) for lock in meta["locks"]
+            ):
+                continue
+            angle = meta.pop("player_angle", None)
             return {"family": family, "seed": seed, "size": size, "grid": "\n".join(rows),
-                    "player_angle": rng.choice((0, 90, 180, 270)), **meta}
+                    "player_angle": rng.choice((0, 90, 180, 270)) if angle is None else angle, **meta}
     raise RuntimeError(f"could not generate a solvable {family} map for seed {seed}")
 
 
@@ -171,6 +179,12 @@ class _Retry(Exception):
 
 
 def _generate(family, rng, size):
+    if family == "comb":
+        return _comb(rng, size)
+    if family == "locksfirst":
+        return _locksfirst(rng, size)
+    if family == "ambush":
+        return _ambush(rng, size)
     if family == "maze":
         return _maze(rng, {"s": 15, "m": 25, "l": 35}[size])
     if family == "irregular":
@@ -300,6 +314,178 @@ def _generate(family, rng, size):
             g[r][c] = rng.choice(ITEMS)
             occupied.add((r, c))
     return g, {"episode_ticks": ticks, "locks": [col for _, col in locks], "rooms": len(rooms_kept)}
+
+
+def _carve(grid, bounds):
+    r0, c0, r1, c1 = bounds
+    for r in range(r0, r1 + 1):
+        grid[r][c0:c1 + 1] = ["."] * (c1 - c0 + 1)
+
+
+def _trim_walls(grid):
+    """Crop unused space while retaining one cell of wall around the map."""
+    cells = [(r, c) for r, row in enumerate(grid) for c, ch in enumerate(row) if ch != "#"]
+    rows, cols = zip(*cells)
+    left, right = min(cols) - 1, max(cols) + 2
+    return [row[left:right] for row in grid[min(rows) - 1:max(rows) + 2]]
+
+
+def _place(lay, room, rng, symbols):
+    r, c = rng.choice(_free_cells(lay, room, lay.grid))
+    lay.grid[r][c] = rng.choice(symbols)
+
+
+def _side_rooms(rng, doors, width=1, bend_at=None):
+    """Build a west-to-east corridor with one isolated room per door in walking order."""
+    grid = [["#"] * (10 * len(doors) + 10) for _ in range(22)]
+    lay = Layout(grid, {})
+    row, start, left = 7, 1, rng.randint(4, 6)
+    for room, door in enumerate(doors):
+        if room == bend_at:
+            # Leave the gap between rooms clear for a two-turn offset.
+            turn = left - 2
+            shift = rng.randint(4, 6)
+            _carve(grid, (row, start, row + width - 1, turn + width - 1))
+            _carve(grid, (row, turn, row + shift + width - 1, turn + width - 1))
+            row, start = row + shift, turn
+        right = left + rng.randint(3, 6) - 1
+        depth = rng.randint(2, 5)
+        if rng.choice((False, True)):
+            wall = row - 1
+            bounds = (wall - depth, left, wall - 1, right)
+        else:
+            wall = row + width
+            bounds = (wall + 1, left, wall + depth, right)
+        _carve(grid, bounds)
+        lay.rooms[room] = bounds
+        grid[wall][rng.randint(left, right)] = door
+        left = right + rng.randint(4, 5)
+    _carve(grid, (row, start, row + width - 1, right + rng.randint(1, 3)))
+    grid[7][1] = "P"
+    return lay
+
+
+def _comb(rng, size):
+    count = rng.randint(*{"s": (4, 6), "m": (6, 9), "l": (9, 12)}[size])
+    bend = rng.randrange(1, count) if rng.choice((False, True)) else None
+    lay = _side_rooms(rng, "D" * count, rng.randint(1, 2), bend)
+    r, c = _exit_cell(lay, rng.randrange(1, count), lay.grid, rng)
+    lay.grid[r][c] = "E"
+    for symbols, total in (("hk", rng.randint(0, 2)), ("zi", rng.randint(0, 3))):
+        for room in rng.sample(list(lay.rooms), total):
+            _place(lay, room, rng, symbols)
+    return _trim_walls(lay.grid), {"episode_ticks": 3500 if size == "l" else 2800,
+                                   "locks": [], "rooms": count, "player_angle": 0}
+
+
+def _locksfirst(rng, size):
+    if rng.choice((False, True)):
+        locks = rng.sample(list(KEY_OF), rng.randint(2, 3))
+        lay = _locks_hub(rng, locks)
+        goal = "exit"
+    else:
+        locks = rng.sample(list(KEY_OF), rng.randint(1, 3))
+        lay = _side_rooms(rng, [*locks, "D"])
+        for room, lock in enumerate(locks, start=1):
+            _place(lay, room, rng, KEY_OF[lock])
+        goal = 0
+    r, c = _exit_cell(lay, goal, lay.grid, rng)
+    lay.grid[r][c] = "E"
+    rooms = list(lay.rooms)
+    for _ in range(rng.randint(0, 3)):
+        _place(lay, rng.choice(rooms), rng, "zi")
+    return _trim_walls(lay.grid), {"episode_ticks": 4200 if size == "l" else 3500,
+                                   "locks": locks, "rooms": len(lay.rooms)}
+
+
+def _locks_hub(rng, locks):
+    center = 24
+    half_height, half_width = rng.randint(2, 4), rng.randint(2, 4)
+    hub = (center - half_height, center - half_width, center + half_height, center + half_width)
+    grid = [["#"] * (2 * center + 1) for _ in range(2 * center + 1)]
+    lay = Layout(grid, {"hub": hub})
+    _carve(grid, hub)
+    grid[center][center] = "P"
+    directions = rng.sample([(-1, 0), (0, 1), (1, 0), (0, -1)], len(locks) + 1)
+    for (dr, dc), room in zip(directions, [*locks, "exit"]):
+        door_types = locks if room == "exit" else ["D"]
+        end = rng.randint(2, 4)
+        doors = {end: door_types[0]}
+        for door in door_types[1:]:
+            end += rng.randint(2, 4)
+            doors[end] = door
+        radius = half_height if dr else half_width
+        r0, c0 = center + radius * dr, center + radius * dc
+        for step in range(1, end + 1):
+            grid[r0 + step * dr][c0 + step * dc] = doors.get(step, ".")
+
+        # Define the end room in coordinates along and across the spoke.
+        depth = rng.randint(2, 5)
+        left, right = -rng.randint(1, 2), rng.randint(1, 3)
+        a = (r0 + (end + 1) * dr + left * dc, c0 + (end + 1) * dc - left * dr)
+        b = (r0 + (end + depth) * dr + right * dc, c0 + (end + depth) * dc - right * dr)
+        bounds = (min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
+        _carve(grid, bounds)
+        lay.rooms[room] = bounds
+        if room != "exit":
+            _place(lay, room, rng, KEY_OF[room])
+    return lay
+
+
+def _ambush(rng, size):
+    count = rng.randint(*{"s": (4, 6), "m": (5, 7), "l": (6, 8)}[size])
+    column = rng.randint(11, 13)
+    alcoves = []
+    for _ in range(count):
+        alcoves.append(column)
+        column += rng.randint(2, 4)
+    end = column + rng.randint(2, 4)
+    row = 7
+    grid = [["#"] * (end + 2) for _ in range(15)]
+    lay = Layout(grid, {})
+    _carve(grid, (row, 1, row, end))
+    start_room = rng.choice((False, True))
+    if start_room:
+        start = (row - 2, 1, row + 2, 5)
+        _carve(grid, start)
+        lay.rooms["start"] = start
+    grid[row][2] = "P"
+    if start_room:
+        nearby = [(r, c) for r, c in _free_cells(lay, "start", grid) if abs(r - row) + abs(c - 2) <= 4]
+        for r, c in rng.sample(nearby, rng.randint(2, 4)):
+            grid[r][c] = "d"
+
+    sides = [-1, 1] + rng.choices((-1, 1), k=count - 2)
+    rng.shuffle(sides)
+    monsters = rng.sample(MONSTERS_HARD, min(count, len(MONSTERS_HARD)))
+    monsters += rng.choices(MONSTERS_HARD, k=count - len(monsters))
+    rng.shuffle(monsters)
+    for c, side, monster in zip(alcoves, sides, monsters):
+        depth = rng.randint(1, 3)
+        for step in range(1, depth):
+            grid[row + step * side][c] = "."
+        grid[row + depth * side][c] = monster
+
+    locks = []
+    if rng.choice((False, True)):
+        lock = rng.choice(list(KEY_OF))
+        locks.append(lock)
+        side = rng.choice((-1, 1))
+        near, far = sorted((row + 2 * side, row + rng.randint(3, 5) * side))
+        lay.rooms["exit"] = (near, 7, far, 9)
+        _carve(grid, lay.rooms["exit"])
+        grid[row + side][8] = lock
+        grid[row][end] = KEY_OF[lock]
+        r, c = _exit_cell(lay, "exit", grid, rng)
+        grid[r][c] = "E"
+    else:
+        grid[row][end] = "E"
+    pickups = [rng.choice("hm"), "k"] + rng.choices("hmk", k=rng.randint(0, 1))
+    cells = [c for c in range(6, end) if not _touches_door(grid, row, c)]
+    for c, pickup in zip(rng.sample(cells, len(pickups)), pickups):
+        grid[row][c] = pickup
+    return _trim_walls(grid), {"episode_ticks": 3500, "locks": locks, "rooms": count + len(lay.rooms),
+                               "player_angle": 0}
 
 
 def _maze(rng, side):
