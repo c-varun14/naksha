@@ -9,6 +9,7 @@ import logging
 import math
 import multiprocessing as mp
 import os
+import random
 from collections.abc import Sequence
 from dataclasses import dataclass
 from multiprocessing.connection import Connection, wait
@@ -27,6 +28,7 @@ from doom_env import make_env
 from naksha.actions import to_buttons
 from naksha.features import KEYS, SHAPES, encode
 from naksha.model import NakshaNet, load_checkpoint, save_checkpoint
+from training.eval.stock import STOCK_MAPS, build_specs
 from training.gen.compile import CELL, write_map
 from training.gen.families import generate
 
@@ -34,7 +36,7 @@ FAMILIES = ("arena", "rooms", "locks", "gauntlet")
 SIZES = ("s", "m", "l")
 LOG = logging.getLogger(__name__)
 METRICS = ("iteration", "steps", "return_mean", "exit_rate", "kills", "novelty_cells",
-           "kl", "entropy", "value_loss", "fps")
+           "kl", "entropy", "value_loss", "fps", "stock_exit_rate", "generated_exit_rate")
 
 
 def gae(
@@ -56,10 +58,17 @@ def _cell(state: dict) -> tuple[int, int]:
 
 
 class EpisodeReward:
-    def __init__(self, state: dict, door_locks: dict[int, int]) -> None:
+    def __init__(self, state: dict, door_locks: dict[int, int], *, stock: bool = False) -> None:
         self.previous = state
         self.door_locks = door_locks
-        self.opened = {sector for sector in door_locks if state["sector_ceiling"][sector] > 8}
+        self.door_thresholds = {
+            sector: state["sector_ceiling"][sector] + 32 if stock else 8
+            for sector in door_locks
+        }
+        self.opened = {
+            sector for sector, threshold in self.door_thresholds.items()
+            if state["sector_ceiling"][sector] > threshold
+        }
         self.cells = {_cell(state)}
         self.total = 0.0
 
@@ -73,7 +82,9 @@ class EpisodeReward:
             reward -= 1.0
         reward += 0.5 * np.count_nonzero(np.logical_and(state["keys"], np.logical_not(previous["keys"])))
         for sector, lock in self.door_locks.items():
-            if sector not in self.opened and previous["sector_ceiling"][sector] <= 8 < state["sector_ceiling"][sector]:
+            threshold = self.door_thresholds[sector]
+            if (sector not in self.opened
+                    and previous["sector_ceiling"][sector] <= threshold < state["sector_ceiling"][sector]):
                 self.opened.add(sector)
                 reward += 0.5 if lock > 0 else 0.2
         cell = _cell(state)
@@ -97,9 +108,21 @@ class Rollout:
     dones: np.ndarray
     starts_episode: bool
     chunks: list[tuple[int, np.ndarray]]
-    episodes: list[tuple[float, bool]]
+    episodes: list[tuple[float, bool, bool]]
     kills: int
     novelty_cells: int
+
+
+def episode_metrics(rollouts: dict[int, Rollout]) -> dict[str, float | None]:
+    episodes = [episode for rollout in rollouts.values() for episode in rollout.episodes]
+    stock_exits = [exited for _, exited, stock in episodes if stock]
+    generated_exits = [exited for _, exited, stock in episodes if not stock]
+    return {
+        "return_mean": sum(reward for reward, _, _ in episodes) / len(episodes) if episodes else None,
+        "exit_rate": sum(stock_exits + generated_exits) / len(episodes) if episodes else None,
+        "stock_exit_rate": sum(stock_exits) / len(stock_exits) if stock_exits else None,
+        "generated_exit_rate": sum(generated_exits) / len(generated_exits) if generated_exits else None,
+    }
 
 
 class Collector:
@@ -109,20 +132,26 @@ class Collector:
         self.episode_counter = episode_counter
         self.model = NakshaNet().eval()
         self.env = None
+        self.stock_specs = build_specs(getattr(args, "stock_maps", ()))
 
     def _start_episode(self) -> None:
         k = self.episode_counter.value
         self.episode_counter.value += 1
         args = self.args
         seed = args.seed_offset + self.worker * 100_000 + k
-        # Cycle through every family at each size before advancing to the next size.
-        family = args.families[(self.worker + k) % len(args.families)]
-        size = args.sizes[(self.worker + k // len(args.families)) % len(args.sizes)]
-        spec = generate(family, seed, size)
-        wad = write_map(spec["grid"], "map.wad", player_angle=spec["player_angle"])
-        self.env = make_env(wad, "MAP01", episode_ticks=spec["episode_ticks"], render_buffers=True)
+        rng = random.Random(seed) if self.stock_specs else None
+        self.stock = rng is not None and rng.random() < args.stock_frac
+        if self.stock:
+            spec = rng.choice(self.stock_specs)
+            wad = spec["wad"]
+        else:
+            family = args.families[(self.worker + k) % len(args.families)]
+            size = args.sizes[(self.worker + k // len(args.families)) % len(args.sizes)]
+            spec = generate(family, seed, size)
+            wad = write_map(spec["grid"], "map.wad", player_angle=spec["player_angle"])
+        self.env = make_env(wad, spec.get("map", "MAP01"), episode_ticks=spec["episode_ticks"], render_buffers=True)
         self.obs, _ = self.env.reset(seed=seed)
-        self.reward = EpisodeReward(self.env.privileged_state(), self.env.mapinfo.door_sectors)
+        self.reward = EpisodeReward(self.env.privileged_state(), self.env.mapinfo.door_sectors, stock=self.stock)
         self.hidden = self.model.initial_state(1)
         self.prev_action = 0
 
@@ -166,7 +195,7 @@ class Collector:
             rollout.novelty_cells += novel
             rollout.dones[t] = terminated or truncated
             if rollout.dones[t]:
-                rollout.episodes.append((self.reward.total, state["exit_reached"]))
+                rollout.episodes.append((self.reward.total, state["exit_reached"], self.stock))
                 self.close()
         rollout.values[n] = 0.0
         if self.env is not None:
@@ -405,15 +434,13 @@ def train(args: argparse.Namespace) -> dict:
                 rollouts = workers.collect(weights)
                 if rollouts:
                     losses = _update(model, reference, optimizer, rollouts, reference_hidden, args)
-                    episodes = [episode for rollout in rollouts.values() for episode in rollout.episodes]
                     steps = sum(len(rollout.actions) for rollout in rollouts.values())
                     meta["steps"] += steps
                     meta["iterations"] += 1
                     writer.writerow({
                         "iteration": meta["iterations"],
                         "steps": meta["steps"],
-                        "return_mean": sum(reward for reward, _ in episodes) / len(episodes) if episodes else None,
-                        "exit_rate": sum(exited for _, exited in episodes) / len(episodes) if episodes else None,
+                        **episode_metrics(rollouts),
                         "kills": sum(rollout.kills for rollout in rollouts.values()),
                         "novelty_cells": sum(rollout.novelty_cells for rollout in rollouts.values()),
                         **losses,
@@ -437,7 +464,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--minutes", required=True, type=float, help="wall-clock budget (0 runs one iteration)")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--steps-per-worker", type=int, default=256)
-    parser.add_argument("--families", nargs="+", choices=FAMILIES, default=FAMILIES)
+    parser.add_argument("--families", nargs="+", choices=(*FAMILIES, "maze", "irregular"), default=FAMILIES)
+    parser.add_argument("--stock-maps", nargs="+", type=str.upper, choices=STOCK_MAPS, default=())
+    parser.add_argument("--stock-frac", type=float, default=0.0,
+                        help="probability of sampling a stock map at each episode reset")
     parser.add_argument("--sizes", nargs="+", choices=SIZES, default=SIZES)
     parser.add_argument("--seed-offset", type=int, default=300_000)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -459,6 +489,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("lr must be finite and positive and clip must be between 0 and 1")
     if not (0 <= args.gamma <= 1 and 0 <= args.lam <= 1 and args.seed_offset >= 0):
         parser.error("gamma and lam must be in [0, 1] and seed-offset must be nonnegative")
+    if not 0 <= args.stock_frac <= 1:
+        parser.error("stock-frac must be in [0, 1]")
+    if args.stock_frac and not args.stock_maps:
+        parser.error("stock-maps is required when stock-frac is positive")
     if args.init.resolve() == args.out.resolve():
         parser.error("init and out must be different paths")
     if torch.device(args.device).type == "cpu":

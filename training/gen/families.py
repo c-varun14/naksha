@@ -4,6 +4,8 @@ arena    (tier 1): one or two large rooms, several monsters, items
 rooms    (tier 2): room lattice with doors, openings, dead ends and loops
 locks    (tier 3): rooms + 1-3 locked doors on the start->exit path, keys hidden in side branches
 gauntlet (tier 4): locks + more monsters and scarcer items
+maze: large DFS maze with narrow corridors
+irregular: L, U and plus-shaped rooms joined by corridors
 
 Every map is checked for key-aware solvability before it is returned.
 """
@@ -169,6 +171,11 @@ class _Retry(Exception):
 
 
 def _generate(family, rng, size):
+    if family == "maze":
+        return _maze(rng, {"s": 15, "m": 25, "l": 35}[size])
+    if family == "irregular":
+        return _irregular(rng, {"s": 3, "m": 4, "l": 5}[size])
+
     dims = {"s": (2, 2), "m": (rng.randint(2, 3), rng.randint(2, 4)), "l": (rng.randint(3, 4), rng.randint(3, 5))}[size]
     if family == "arena":
         nr, nc = (1, rng.randint(1, 2)) if size != "l" else (2, 2)
@@ -293,6 +300,115 @@ def _generate(family, rng, size):
             g[r][c] = rng.choice(ITEMS)
             occupied.add((r, c))
     return g, {"episode_ticks": ticks, "locks": [col for _, col in locks], "rooms": len(rooms_kept)}
+
+
+def _maze(rng, side):
+    width = rng.randint(1, 2)
+    lay = _lattice(rng, side, side, width, width, width, width)
+    _, start, tree, extras = _room_graph(rng, side, side, 0.0, rng.randint(0, 3))
+    g = lay.grid
+    for a, b in tree + extras:
+        _merge_wall(lay, a, b, g)
+    pr, pc, _, _ = lay.rooms[start]
+
+    # BFS order gives the farthest cell after any loop shortcuts.
+    seen, queue = {(pr, pc)}, deque([(pr, pc)])
+    while queue:
+        er, ec = queue.popleft()
+        for r, c in _neighbours(er, ec, len(g), len(g[0])):
+            if g[r][c] == "." and (r, c) not in seen:
+                seen.add((r, c))
+                queue.append((r, c))
+    g[pr][pc], g[er][ec] = "P", "E"
+
+    # A one-cell door spans a narrow passage. Wide mazes keep their full width.
+    if width == 1:
+        candidates = [_opening(lay, a, b, rng) for a, b in tree]
+        candidates = [(r, c) for r, c in candidates if abs(r - er) + abs(c - ec) > 1
+                      and g[r][c] == "."]
+        for r, c in rng.sample(candidates, rng.randint(0, 2)):
+            g[r][c] = "D"
+    return g, {"episode_ticks": 4200, "locks": [], "rooms": side * side}
+
+
+def _irregular(rng, side):
+    pitch = 16  # Room widths of 9–11 cells leave a gap for corridors.
+    extent = pitch * side + 1
+    lay = Layout([["#"] * extent for _ in range(extent)], {})
+    g = lay.grid
+    keep, start, tree, _ = _room_graph(rng, side, side, 0.0, 0)
+    centers = {}
+    shapes = ["L", "U", "+"]
+    for i, j in sorted(keep):
+        r, c = centers[i, j] = (pitch * i + pitch // 2, pitch * j + pitch // 2)
+        h, w = rng.randint(4, 5), rng.randint(4, 5)
+        lay.rooms[i, j] = (r - h, c - w, r + h, c + w)
+        shape = shapes.pop(rng.randrange(len(shapes))) if shapes else rng.choice(("L", "U", "+"))
+        if shape == "+":
+            rects = [(-1, -w, 1, w), (-h, -1, h, 1)]
+        else:
+            rects = [(-1, -w, h, w), (-h, -w, h, -2)]
+            if shape == "U":
+                rects.append((-h, 2, h, w))
+        flip_r, flip_c = rng.choice((-1, 1)), rng.choice((-1, 1))
+        for r0, c0, r1, c1 in rects:
+            for dr in range(r0, r1 + 1):
+                for dc in range(c0, c1 + 1):
+                    g[r + flip_r * dr][c + flip_c * dc] = "."
+        pillars = [(y, x) for y in range(r - h + 1, r + h) for x in range(c - w + 1, c + w)
+                   if abs(y - r) > 1 and abs(x - c) > 1
+                   and all(g[y + dy][x + dx] == "." for dy in (-1, 0, 1) for dx in (-1, 0, 1))]
+        if pillars:
+            y, x = rng.choice(pillars)
+            g[y][x] = "#"
+
+    _, adj = _tree_path(tree, start, start)
+    queue, seen = deque([start]), {start}
+    while queue:
+        goal = queue.popleft()
+        for room in adj[goal]:
+            if room not in seen:
+                seen.add(room)
+                queue.append(room)
+    path, _ = _tree_path(tree, start, goal)
+    on_path = set(path)
+    branches = [(a, b, [room for room in adj[a] if room not in on_path])
+                for a, b in zip(path, path[1:])]
+    lock_sites = [(a, b, rooms) for a, b, rooms in branches if rooms]
+    num_locks = rng.randint(0, min(2, len(lock_sites)))
+    locks = {}
+    for (a, b, rooms), color in zip(rng.sample(lock_sites, num_locks), rng.sample(sorted(KEY_OF), num_locks)):
+        locks[frozenset((a, b))] = color
+        y, x = rng.choice(_free_cells(lay, rng.choice(rooms), g))
+        g[y][x] = KEY_OF[color]
+
+    # Carve from center to center so the corridor meets even recessed room faces.
+    # Doors occupy the middle cell of a one-wide connector between room footprints.
+    door_edges = {frozenset(edge) for edge in rng.sample(tree, rng.randint(1, min(4, len(tree))))}
+    for a, b in tree:
+        edge = frozenset((a, b))
+        door = locks.get(edge, "D" if edge in door_edges else ".")
+        width = rng.randint(1, 3) if door == "." else 1
+        r, c = centers[a]
+        y, x = centers[b]
+        dr, dc = (y - r) // pitch, (x - c) // pitch
+        for step in range(1, pitch):
+            for offset in range(-(width // 2), width - width // 2):
+                rr, cc = r + step * dr + offset * dc, c + step * dc + offset * dr
+                if g[rr][cc] == "#":
+                    g[rr][cc] = "."
+        g[r + pitch // 2 * dr][c + pitch // 2 * dc] = door
+
+    pr, pc = centers[start]
+    g[pr][pc] = "P"
+    er, ec = _exit_cell(lay, goal, g, rng)
+    g[er][ec] = "E"
+    for symbols, count in ((MONSTERS_EASY, rng.randint(0, side)), (ITEMS, rng.randint(1, side))):
+        rooms = sorted(keep - {start})
+        for room in rng.sample(rooms, count):
+            r, c = rng.choice(_free_cells(lay, room, g))
+            g[r][c] = rng.choice(symbols)
+    return g, {"episode_ticks": 4200, "locks": list(locks.values()), "rooms": len(keep)}
 
 
 def _merge_wall(lay, a, b, g):

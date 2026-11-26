@@ -12,7 +12,11 @@ from training.eval.run import evaluate
 from doom_env.wrapper import IWAD
 
 
-def build_specs() -> list[dict]:
+STOCK_MAPS = tuple(f"MAP{i:02d}" for i in range(1, 33))
+HELD_OUT_MAPS = STOCK_MAPS[:5]
+
+
+def build_specs(map_names=HELD_OUT_MAPS) -> list[dict]:
     """Use the bundled IWAD as both the base game and the scenario WAD."""
     return [
         {
@@ -23,7 +27,7 @@ def build_specs() -> list[dict]:
             "episode_ticks": 4200,
             "grid": None,
         }
-        for map_name in (f"MAP{i:02d}" for i in range(1, 6))
+        for map_name in map_names
     ]
 
 

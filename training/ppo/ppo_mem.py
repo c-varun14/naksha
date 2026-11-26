@@ -225,15 +225,13 @@ def train(args: argparse.Namespace) -> dict:
                 rollouts = workers.collect(weights)
                 if rollouts:
                     losses = _update(policy, reference, optimizer, rollouts, reference_hidden, args)
-                    episodes = [episode for rollout in rollouts.values() for episode in rollout.episodes]
                     steps = sum(len(rollout.actions) for rollout in rollouts.values())
                     meta["steps"] += steps
                     meta["iterations"] += 1
                     writer.writerow({
                         "iteration": meta["iterations"],
                         "steps": meta["steps"],
-                        "return_mean": sum(reward for reward, _ in episodes) / len(episodes) if episodes else None,
-                        "exit_rate": sum(exited for _, exited in episodes) / len(episodes) if episodes else None,
+                        **ppo.episode_metrics(rollouts),
                         "kills": sum(rollout.kills for rollout in rollouts.values()),
                         "novelty_cells": sum(rollout.novelty_cells for rollout in rollouts.values()),
                         **losses,
