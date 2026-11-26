@@ -15,6 +15,8 @@ sys.path.insert(0, str(SUBMISSION_DIR))
 
 from naksha import actions, features, model  # noqa: E402
 
+TEMPERATURE = 0.0
+
 
 class DoomAgent:
     def __init__(
@@ -26,7 +28,12 @@ class DoomAgent:
         self.device = device
         torch.set_num_threads(1)
         path = weights or os.environ.get("NAKSHA_WEIGHTS") or SUBMISSION_DIR / "weights" / "naksha.pt"
-        self.model, _ = model.load_checkpoint(path)
+        self.model, meta = model.load_checkpoint(path)
+        # Actions are sampled from the policy distribution at this temperature (0 = argmax).
+        # Sampling keeps every decision with the network while avoiding deterministic loops.
+        default_t = float(meta.get("temperature", TEMPERATURE))
+        self.temperature = float(os.environ.get("NAKSHA_TEMPERATURE", default_t))
+        self.episode = 0
         self.model.eval()
         zeros = {key: torch.from_numpy(np.zeros((1, 1, *shape), dtype))
                  for key, (shape, dtype) in features.SHAPES.items()}
@@ -35,6 +42,8 @@ class DoomAgent:
         self.reset()
 
     def reset(self) -> None:
+        self.episode = getattr(self, "episode", -1) + 1
+        self.rng = torch.Generator().manual_seed(1234 + self.episode)
         self.state = self.model.initial_state(1)
         self.prev_action = 0
         self.last_out: dict[str, np.ndarray | float] = {}
@@ -50,5 +59,9 @@ class DoomAgent:
             "intention": out["intention"][0, 0].softmax(dim=-1).numpy(),
             "exit_vis": out["exit_vis"][0, 0].sigmoid().item(),
         }
-        self.prev_action = int(logits.argmax())
+        if self.temperature > 0:
+            probs = torch.softmax(logits / self.temperature, dim=-1)
+            self.prev_action = int(torch.multinomial(probs, 1, generator=self.rng))
+        else:
+            self.prev_action = int(logits.argmax())
         return actions.to_buttons(self.prev_action)

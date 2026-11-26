@@ -77,7 +77,7 @@ def _run_episode(
         p50, p99 = np.percentile(act_times, [50, 99])
         return {
             "id": spec.get("id"), "family": spec["family"], "seed": seed,
-            "exit": priv["exit_reached"], "dead": priv["dead"], "tics": priv["tic"],
+            "exit": priv["exit_reached"], "dead": priv["dead"], "tics": len(act_times) * 4,
             "keys": int(np.count_nonzero(obs["vitals"][8:14])),
             "doors_opened": int(opened.sum()), "locked_opened": int((opened & locked).sum()),
             "cells_visited": len(cells), "kills": priv["kills"], "damage_taken": priv["damage_taken"],
