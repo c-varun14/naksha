@@ -25,6 +25,8 @@ MUTED = (167, 186, 201)
 ACCENT = (88, 226, 233)
 GREEN = (115, 231, 167)
 TRACK = (39, 54, 68)
+MEMORY_OFF_RED = (165, 33, 47)
+WALL = (182, 194, 202)
 KEY_COLORS = {"r": (255, 90, 93), "b": (88, 172, 255), "y": (255, 211, 84)}
 CELL_COLORS = {
     "#": (23, 33, 43), "D": (156, 101, 61), "E": (46, 173, 105),
@@ -59,8 +61,53 @@ def blank_frame() -> np.ndarray:
     return frame
 
 
-class AudienceMap:
+def _line_pixels(x, y, nx, ny):
+    count = math.ceil(max(abs(nx - x), abs(ny - y))) + 1
+    xs = np.rint(np.linspace(x, nx, count)).astype(int)
+    ys = np.rint(np.linspace(y, ny, count)).astype(int)
+    return xs, ys
+
+
+class _TrajectoryMap:
+    def __init__(self):
+        self.trail = np.zeros((MAP_HEIGHT, MAP_WIDTH), dtype=bool)
+        self.position = None
+        self.heading = 0.0
+
+    def _trace(self, position, angle):
+        self.heading = math.radians(angle)
+        if self.position is not None:
+            xs, ys = _line_pixels(*self.position, *position)
+            for dx, dy in ((0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)):
+                xx, yy = xs + dx, ys + dy
+                inside = (0 <= xx) & (xx < MAP_WIDTH) & (0 <= yy) & (yy < MAP_HEIGHT)
+                self.trail[yy[inside], xx[inside]] = True
+        self.position = position
+
+    def _draw_player(self, panel, size):
+        if self.position is None:
+            return
+        x, y = self.position
+        left, right = max(0, int(x - size)), min(MAP_WIDTH, math.ceil(x + size + 1))
+        top, bottom = max(0, int(y - size)), min(MAP_HEIGHT, math.ceil(y + size + 1))
+        if left >= right or top >= bottom:
+            return
+        ys, xs = np.ogrid[top:bottom, left:right]
+        c, s = math.cos(self.heading), math.sin(self.heading)
+        forward = (xs - x) * c - (ys - y) * s
+        sideways = (xs - x) * s + (ys - y) * c
+        half_width = (size - forward) * .46
+        # A notched arrow with a dark outline stays legible over the trail.
+        tail = -size * .65 + np.maximum(0, size * .38 - np.abs(sideways))
+        arrow = (forward >= tail) & (np.abs(sideways) <= half_width)
+        region = panel[top:bottom, left:right]
+        region[arrow] = MAP_BACKGROUND
+        region[arrow & (forward >= tail + 2) & (np.abs(sideways) <= half_width - 1.5)] = TEXT
+
+
+class AudienceMap(_TrajectoryMap):
     def __init__(self, rows: list[str]):
+        super().__init__()
         self.rows = rows
         self.height, self.width = len(rows), len(rows[0])
         self.cell_px = min(MAP_WIDTH / self.width, MAP_HEIGHT / self.height)
@@ -73,9 +120,6 @@ class AudienceMap:
         self.lit_colors = np.where((self.colors == FLOOR).all(axis=2, keepdims=True),
                                    np.array(EXPLORED, dtype=np.uint8), self.colors)
         self.seen = np.zeros((self.height, self.width), dtype=bool)
-        self.trail = np.zeros((MAP_HEIGHT, MAP_WIDTH), dtype=bool)
-        self.position = None
-        self.heading = 0.0
         self.keys = {(r, c): ch for r, row in enumerate(rows)
                      for c, ch in enumerate(row) if ch in KEY_COLORS}
         self.labels = {(r, c): "EXIT" if ch == "E" else ch for r, row in enumerate(rows)
@@ -107,21 +151,9 @@ class AudienceMap:
 
     def observe(self, pose, rays=None):
         x, y = pose["x"] / CELL, self.height - pose["y"] / CELL
-        self.heading = math.radians(pose["angle"])
         if rays is not None:
-            self._mark_rays(x, y, self.heading, rays["distance"])
-        position = self._pixel(x, y)
-        if self.position is not None:
-            px, py = self.position
-            nx, ny = position
-            count = math.ceil(max(abs(nx - px), abs(ny - py))) + 1
-            xs = np.rint(np.linspace(px, nx, count)).astype(int)
-            ys = np.rint(np.linspace(py, ny, count)).astype(int)
-            for dx, dy in ((0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)):
-                xx, yy = xs + dx, ys + dy
-                inside = (0 <= xx) & (xx < MAP_WIDTH) & (0 <= yy) & (yy < MAP_HEIGHT)
-                self.trail[yy[inside], xx[inside]] = True
-        self.position = position
+            self._mark_rays(x, y, math.radians(pose["angle"]), rays["distance"])
+        self._trace(self._pixel(x, y), pose["angle"])
 
     def pick_up(self, symbol, pose):
         cells = [cell for cell, key in self.keys.items() if key == symbol]
@@ -147,27 +179,43 @@ class AudienceMap:
         for (r, c), key in self.keys.items():
             x, y = map(int, self._pixel(c + .5, r + .5))
             _key_icon(panel, x, y, key, max(1, min(2, int(self.cell_px) // 16)))
-        if self.position is not None:
-            self._draw_player(panel)
+        self._draw_player(panel, max(10, min(20, self.cell_px * .58)))
 
-    def _draw_player(self, panel):
-        x, y = self.position
-        size = max(10, min(20, self.cell_px * .58))
-        left, right = max(0, int(x - size)), min(MAP_WIDTH, math.ceil(x + size + 1))
-        top, bottom = max(0, int(y - size)), min(MAP_HEIGHT, math.ceil(y + size + 1))
-        if left >= right or top >= bottom:
-            return
-        ys, xs = np.ogrid[top:bottom, left:right]
-        c, s = math.cos(self.heading), math.sin(self.heading)
-        forward = (xs - x) * c - (ys - y) * s
-        sideways = (xs - x) * s + (ys - y) * c
-        half_width = (size - forward) * .46
-        # A notched arrow with a dark outline stays legible over the trail.
-        tail = -size * .65 + np.maximum(0, size * .38 - np.abs(sideways))
-        arrow = (forward >= tail) & (np.abs(sideways) <= half_width)
-        region = panel[top:bottom, left:right]
-        region[arrow] = MAP_BACKGROUND
-        region[arrow & (forward >= tail + 2) & (np.abs(sideways) <= half_width - 1.5)] = TEXT
+
+class SectorMap(_TrajectoryMap):
+    def __init__(self, polygons, doors):
+        super().__init__()
+        self.level = np.full((MAP_HEIGHT, MAP_WIDTH, 3), MAP_BACKGROUND, dtype=np.uint8)
+        sectors = [(sector, lines) for sector, lines in polygons if lines.size]
+        points = np.concatenate([lines for _, lines in sectors]).reshape(-1, 2) if sectors else np.zeros((1, 2))
+        lo, hi = points.min(axis=0), points.max(axis=0)
+        self.origin = (lo + hi) / 2
+        width, height = np.maximum(hi - lo, 1)
+        self.scale = min((MAP_WIDTH - 24) / width, (MAP_HEIGHT - 24) / height)
+
+        # Shared boundaries take the door color, with locked doors drawn last.
+        for sector, lines in sorted(sectors, key=lambda pair: doors.get(pair[0], -1)):
+            lock = doors.get(sector, -1)
+            color = WALL if lock < 0 else CELL_COLORS["D" if lock == 0 else "R"]
+            for x1, y1, x2, y2 in lines:
+                xs, ys = _line_pixels(*self._pixel(x1, y1), *self._pixel(x2, y2))
+                self.level[ys, xs] = color
+
+    def _pixel(self, x, y):
+        return (MAP_WIDTH / 2 + (x - self.origin[0]) * self.scale,
+                MAP_HEIGHT / 2 - (y - self.origin[1]) * self.scale)
+
+    def observe(self, pose, rays=None):
+        self._trace(self._pixel(pose["x"], pose["y"]), pose["angle"])
+
+    def pick_up(self, symbol, pose):
+        # Only the ASCII map has static key markers to remove.
+        pass
+
+    def draw(self, panel):
+        panel[:] = self.level
+        panel[self.trail] = ACCENT
+        self._draw_player(panel, 12)
 
 
 @lru_cache(maxsize=4)
@@ -250,15 +298,22 @@ def _draw_status(panel, state):
             draw_text(panel, 36, y + row * line_height, line, color, scale)
 
 
-def composite(rgb: np.ndarray, audience: AudienceMap, state: dict | None = None) -> np.ndarray:
+def composite(rgb: np.ndarray, audience: AudienceMap | SectorMap, state: dict | None = None) -> np.ndarray:
     frame = blank_frame()
     _draw_game(frame, rgb)
     panel = frame[:, GAME_WIDTH:]
     panel[:, :2] = TRACK
-    draw_text(panel, 20, 18, "LEVEL MAP", TEXT, scale=4)
-    draw_text(panel, 20, 54, "FOR YOU - NAKSHA CAN'T SEE IT", MUTED if "MUTED" in globals() else TEXT, scale=2)
-    map_panel = panel[78:78+MAP_HEIGHT, 20:380]
+    state = state or {}
+    offset = 0
+    if state.get("memory") == "off":
+        panel[:34] = MEMORY_OFF_RED
+        _center_text(panel, PANEL_WIDTH // 2, 17, "MEMORY OFF", TEXT, 3)
+        offset = 30
+    draw_text(panel, 20, 18 + offset, "LEVEL MAP", TEXT, scale=4)
+    draw_text(panel, 20, 54 + offset, "FOR YOU - NAKSHA CAN'T SEE IT", MUTED, scale=2)
+    map_top = 78 + offset
+    map_panel = panel[map_top:map_top+MAP_HEIGHT, 20:380]
     map_panel[:] = MAP_BACKGROUND
     audience.draw(map_panel)
-    _draw_status(panel, state or {})
+    _draw_status(panel, state)
     return frame
