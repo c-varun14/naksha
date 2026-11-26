@@ -148,7 +148,9 @@ class Collector:
             family = args.families[(self.worker + k) % len(args.families)]
             size = args.sizes[(self.worker + k // len(args.families)) % len(args.sizes)]
             spec = generate(family, seed, size)
-            wad = write_map(spec["grid"], "map.wad", player_angle=spec["player_angle"])
+            restyle = random.Random(seed + 7_919).random() < getattr(args, "look_frac", 0.0)
+            wad = write_map(spec["grid"], "map.wad", player_angle=spec["player_angle"],
+                            look_seed=seed if restyle else None)
         self.env = make_env(wad, spec.get("map", "MAP01"), episode_ticks=spec["episode_ticks"], render_buffers=True)
         self.obs, _ = self.env.reset(seed=seed)
         self.reward = EpisodeReward(self.env.privileged_state(), self.env.mapinfo.door_sectors, stock=self.stock)
@@ -469,6 +471,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--stock-frac", type=float, default=0.0,
                         help="probability of sampling a stock map at each episode reset")
     parser.add_argument("--sizes", nargs="+", choices=SIZES, default=SIZES)
+    parser.add_argument("--look-frac", type=float, default=0.0,
+                        help="probability that a generated map gets a random appearance (textures, light, ceiling)")
     parser.add_argument("--seed-offset", type=int, default=300_000)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--kl-coef", type=float, default=0.05)
@@ -491,6 +495,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("gamma and lam must be in [0, 1] and seed-offset must be nonnegative")
     if not 0 <= args.stock_frac <= 1:
         parser.error("stock-frac must be in [0, 1]")
+    if not 0 <= args.look_frac <= 1:
+        parser.error("look-frac must be in [0, 1]")
     if args.stock_frac and not args.stock_maps:
         parser.error("stock-maps is required when stock-frac is positive")
     if args.init.resolve() == args.out.resolve():

@@ -231,10 +231,17 @@ def _dir(e):
     return ((x2 > x1) - (x2 < x1), (y2 > y1) - (y2 < y1))
 
 
-def write_map(grid: str, path: str | Path, *, player_angle: int | None = None, map_name: str = "MAP01") -> Path:
+def write_map(grid: str, path: str | Path, *, player_angle: int | None = None, map_name: str = "MAP01",
+              look_seed: int | None = None) -> Path:
+    """Write the grid as a WAD. With `look_seed`, the map gets a random appearance (training/gen/look.py)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     text = compile_grid(grid, player_angle=player_angle)
+    if look_seed is not None:
+        import random
+
+        from training.gen.look import restyle
+        text = restyle(text, random.Random(look_seed))
     write_wad(path, [Lump(map_name, b""), Lump("TEXTMAP", text.encode("ascii")), Lump("ENDMAP", b"")])
     return path
 
