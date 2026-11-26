@@ -47,13 +47,16 @@
     .editor, .panel { padding: 10px 14px; }
     .panel header { display: flex; align-items: baseline; gap: 4px 16px; flex-wrap: wrap; }
     label { display: block; font-weight: 650; }
-    #examples { margin-bottom: 10px; }
-    textarea, select, button { color: inherit; font: inherit; }
-    textarea, select {
+    #examples, .wad-fields { margin-bottom: 10px; }
+    textarea, select, input, button { color: inherit; font: inherit; }
+    textarea, select, input {
       width: 100%; border: 1px solid #536279; border-radius: 6px;
       padding: 6px 9px; background: #0c1119;
     }
-    label + select, label + textarea { margin-top: 4px; }
+    label + select, label + textarea, label + input { margin-top: 4px; }
+    .wad-fields { display: grid; grid-template-columns: 1fr 7em; gap: 8px; }
+    .wad-fields > label { grid-column: 1 / -1; }
+    textarea:disabled { opacity: .5; }
     textarea {
       display: block; min-height: 5em; height: clamp(5em, 18vh, 13em); resize: vertical;
       white-space: pre; font-family: ui-monospace, monospace; line-height: 1.25; color: #e6f0fb;
@@ -62,12 +65,15 @@
     .legend { display: flex; gap: 4px 12px; flex-wrap: wrap; margin: 8px 0 12px; color: var(--muted); font-size: .85rem; }
     .legend span { display: inline-block; }
     .legend code { color: var(--text); font-size: 1em; font-weight: bold; }
-    .controls { display: grid; grid-template-columns: 1fr 1.25fr; gap: 12px; align-items: end; margin-top: 10px; }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin-top: 10px; }
+    .controls > * { flex: 1 0 auto; }
     button {
       min-height: 46px; padding: 4px 14px; border: none; border-radius: 7px;
       background: var(--accent); color: #092420; font-size: 1.2rem; font-weight: 800; cursor: pointer;
     }
     button:disabled { opacity: .6; cursor: wait; }
+    #memory { background: #253543; color: var(--text); }
+    #memory[aria-checked="false"] { background: #a5212f; }
     .error { color: var(--error); margin-top: 8px; font-weight: 650; }
     .numbers { font-variant-numeric: tabular-nums; }
     #events { max-height: clamp(1.5em, 12dvh, 5.8em); overflow: auto; margin: 4px 0 0; padding-left: 1.35rem; }
@@ -86,6 +92,11 @@
       <form id="editor" class="editor card">
         <label for="examples">Example map</label>
         <select id="examples"><option value="">Custom map</option></select>
+        <div class="wad-fields">
+          <label for="wad">Load map file</label>
+          <input id="wad" type="text" placeholder="/absolute/path/to/level.wad" spellcheck="false" autocomplete="off">
+          <input id="map-name" type="text" value="MAP01" aria-label="Map name" spellcheck="false" maxlength="8">
+        </div>
         <label for="grid">ASCII grid</label>
         <textarea id="grid" rows="8" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="legend error"></textarea>
         <p class="legend" id="legend">
@@ -103,6 +114,7 @@
               <option value="2">2×</option><option value="4">4×</option>
             </select>
           </div>
+          <button id="memory" type="button" role="switch" aria-label="Memory" aria-checked="true">Memory: ON</button>
           <button id="play" type="submit">Play</button>
         </div>
         <p id="error" class="error" role="alert" hidden></p>
@@ -128,6 +140,9 @@
   const byId = id => document.getElementById(id);
   const form = byId('editor');
   const grid = byId('grid');
+  const wad = byId('wad');
+  const mapName = byId('map-name');
+  const memory = byId('memory');
   const examples = byId('examples');
   const frame = byId('frame');
   const screenMessage = byId('screen-message');
@@ -163,14 +178,15 @@
 
   async function loadMaps() {
     try {
-      maps = await getJson('/maps');
+      const [grids, shortcuts] = await Promise.all([getJson('/maps'), getJson('/wad-shortcuts')]);
+      maps = [...grids, ...shortcuts];
       maps.forEach((spec, index) => {
-        const option = new Option(spec.id + ' · ' + spec.family, String(index));
+        const option = new Option(spec.family ? spec.id + ' · ' + spec.family : spec.id, String(index));
         examples.add(option);
       });
-      if (maps.length && !grid.value) {
+      if (grids.length && !grid.value && !wad.value) {
         examples.value = '0';
-        grid.value = maps[0].grid;
+        grid.value = grids[0].grid;
       }
     } catch (failure) {
       showError('Could not load example maps. ' + failure.message);
@@ -178,12 +194,28 @@
   }
 
   examples.addEventListener('change', () => {
-    if (examples.value !== '') grid.value = maps[Number(examples.value)].grid;
+    const spec = examples.value === '' ? {} : maps[Number(examples.value)];
+    wad.value = spec.wad || '';
+    mapName.value = spec.map || 'MAP01';
+    grid.disabled = Boolean(spec.wad);
+    if (spec.grid) grid.value = spec.grid;
     showError('');
   });
+  function editWad() {
+    examples.value = '';
+    grid.disabled = Boolean(wad.value.trim());
+    showError('');
+  }
+  wad.addEventListener('input', editWad);
+  mapName.addEventListener('input', editWad);
   grid.addEventListener('input', () => {
     if (examples.value !== '' && grid.value !== maps[Number(examples.value)].grid) examples.value = '';
     showError('');
+  });
+  memory.addEventListener('click', () => {
+    const enabled = memory.getAttribute('aria-checked') !== 'true';
+    memory.setAttribute('aria-checked', String(enabled));
+    memory.textContent = enabled ? 'Memory: ON' : 'Memory: OFF';
   });
 
   form.addEventListener('submit', async event => {
@@ -195,10 +227,12 @@
     pollError = false;
     showError('');
     try {
+      const source = wad.value.trim() ? {wad: wad.value.trim(), map: mapName.value.trim()} : {grid: grid.value};
       const reply = await getJson('/run', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({grid: grid.value, speed: Number(byId('speed').value)})
+        body: JSON.stringify({...source, speed: Number(byId('speed').value),
+          memory: memory.getAttribute('aria-checked') === 'true' ? 'on' : 'off'})
       });
       expectedRun = reply.run_id;
       displayed = '';
