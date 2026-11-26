@@ -85,6 +85,44 @@ class NakshaNet(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
 
+class EnsembleNet(nn.Module):
+    """Several trained policies voting together.
+
+    Each member keeps its own recurrent state. Every step the members' action
+    probabilities are averaged and the result is returned as log-probabilities,
+    so argmax or sampling over it works exactly as for one model.
+    """
+
+    def __init__(self, size: int) -> None:
+        super().__init__()
+        self.members = nn.ModuleList(NakshaNet() for _ in range(size))
+
+    def initial_state(self, batch: int, device: str | torch.device = "cpu") -> Tensor:
+        return torch.stack([member.initial_state(batch, device) for member in self.members])
+
+    def forward(self, inputs: dict[str, Tensor], state: Tensor) -> tuple[dict[str, Tensor], Tensor]:
+        outs, states = [], []
+        for member, member_state in zip(self.members, state):
+            out, new_state = member(inputs, member_state)
+            outs.append(out)
+            states.append(new_state)
+
+        def mean_probs(key: str) -> Tensor:
+            return torch.stack([out[key].softmax(dim=-1) for out in outs]).mean(0).clamp_min(1e-8).log()
+
+        exit_vis = torch.stack([out["exit_vis"].sigmoid() for out in outs]).mean(0).clamp(1e-6, 1 - 1e-6)
+        return {
+            "logits": mean_probs("logits"),
+            "value": torch.stack([out["value"] for out in outs]).mean(0),
+            "intention": mean_probs("intention"),
+            "exit_vis": torch.logit(exit_vis),
+            "exit_dir": torch.stack([out["exit_dir"] for out in outs]).mean(0),
+        }, torch.stack(states)
+
+    def count_params(self) -> int:
+        return sum(p.numel() for p in self.parameters())
+
+
 def load_checkpoint(path: str | Path, device: str | torch.device = "cpu") -> tuple[NakshaNet, dict]:
     checkpoint = torch.load(path, map_location=device, weights_only=True)
     meta = checkpoint.get("meta", {})

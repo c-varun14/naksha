@@ -9,7 +9,7 @@ import torch
 from torch import Tensor, nn
 
 from .actions import NUM_ACTIONS
-from .model import HIDDEN, NakshaNet, _VERSIONS
+from .model import HIDDEN, EnsembleNet, NakshaNet, _VERSIONS
 
 MEMORY_VERSION = "grid-v1"
 CROP_SHAPE = (16, 24, 24)
@@ -225,7 +225,9 @@ def load_any(
         if meta.get(name) != expected:
             raise ValueError(f"{name} mismatch: expected {expected}, got {meta.get(name)!r}")
     version = meta.get("memory")
-    if version is None:
+    if meta.get("ensemble"):
+        model = EnsembleNet(int(meta["ensemble"]))
+    elif version is None:
         model = NakshaNet()
     elif version == MEMORY_VERSION:
         model = NakshaMemNet()
