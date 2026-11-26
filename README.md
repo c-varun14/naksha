@@ -90,52 +90,13 @@ git lfs pull --include="submission/weights/naksha.pt"
 
 ### Generate the dev and holdout suites
 
-The suite manifests are local run files. This rebuilds them from the original seed ranges and adds the organiser WAD to the holdout. Collection below generates and compiles its own training maps.
+The presets recreate the original suite manifests. Collection below generates and compiles its own training maps.
 
 ```bash
-(
-  set -euo pipefail
-  suite_parts=$(mktemp -d)
-  trap 'rm -r -- "$suite_parts"' EXIT
-
-  families=(arena rooms locks gauntlet)
-  sizes=(s m l)
-  for family in "${!families[@]}"; do
-    for size in "${!sizes[@]}"; do
-      dev_start=$((50000 + 1000 * family + 100 * size))
-      holdout_start=$((100000 + 1000 * family + 100 * size))
-      uv run --no-sync python -m training.eval.make_suite \
-        --families "${families[family]}" --sizes "${sizes[size]}" \
-        --seeds "$dev_start-$((dev_start + 2))" \
-        --out "$suite_parts/dev-$family-$size.json"
-      uv run --no-sync python -m training.eval.make_suite \
-        --families "${families[family]}" --sizes "${sizes[size]}" \
-        --seeds "$holdout_start-$((holdout_start + 4))" \
-        --out "$suite_parts/holdout-$family-$size.json"
-    done
-  done
-
-  uv run --no-sync python - "$suite_parts" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-parts = Path(sys.argv[1])
-output = Path("data/suites")
-output.mkdir(parents=True, exist_ok=True)
-for suite in ("dev", "holdout"):
-    specs = []
-    for path in sorted(parts.glob(f"{suite}-*.json")):
-        specs.extend(json.loads(path.read_text()))
-    if suite == "holdout":
-        specs.append({
-            "id": "organiser-two_rooms", "family": "organiser", "seed": 0,
-            "size": "s", "wad": "maps/two_rooms.wad", "episode_ticks": 2100,
-            "grid": None, "locks": [],
-        })
-    (output / f"{suite}.json").write_text(json.dumps(specs, indent=2) + "\n")
-PY
-)
+uv run --no-sync python -m training.eval.make_suite --preset dev --out data/suites/dev.json
+uv run --no-sync python -m training.eval.make_suite --preset holdout \
+  --check 346227e923dfe48a88a4cc559f34d8a34a178b76154f1423f370ed3f6a7900c9 \
+  --out data/suites/holdout.json
 ```
 
 ### Collect, train and run DAgger
@@ -154,11 +115,15 @@ Use the Git LFS checkpoint to evaluate the reported `bc0` weights. The reference
 
 ```bash
 uv run --no-sync python -m training.eval.run --suite data/suites/holdout.json \
-  --policy agent --weights submission/weights/naksha.pt --seeds 3 --name holdout-bc0
+  --policy agent --weights submission/weights/naksha.pt --seeds 3 --procs 3 --name holdout-bc0
 uv run --no-sync python -m training.eval.run --suite data/suites/holdout.json \
-  --policy random --seeds 3 --name holdout-random
+  --policy random --seeds 3 --procs 3 --name holdout-random
 uv run --no-sync python -m training.eval.run --suite data/suites/holdout.json \
-  --policy teacher --seeds 3 --name holdout-teacher
+  --policy teacher --seeds 3 --procs 3 --name holdout-teacher
+uv run --no-sync python -m training.eval.report \
+  --runs bc0=runs/eval/holdout-bc0.json random=runs/eval/holdout-random.json \
+    reference=runs/eval/holdout-teacher.json \
+  --families rooms locks arena gauntlet organiser --format md
 ```
 
 ### Demo
