@@ -34,7 +34,7 @@
     }
     .editor {
       position: absolute; z-index: 1; top: calc(100% + 8px); right: 0;
-      width: min(480px, 100%); max-height: calc(100dvh - 175px); overflow: auto;
+      width: min(560px, 100%); max-height: calc(100dvh - 175px); overflow: auto;
       box-shadow: 0 12px 30px #0008;
     }
     .viewport { position: relative; overflow: hidden; background: #070b10; }
@@ -75,6 +75,24 @@
     #memory { background: #253543; color: var(--text); }
     #memory[aria-checked="false"] { background: #a5212f; }
     .error { color: var(--error); margin-top: 8px; font-weight: 650; }
+    .builder-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 4px; }
+    .builder-head button { min-height: 30px; padding: 2px 10px; font-size: .85rem; background: #253543; color: var(--text); }
+    .palette { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+    .palette button {
+      min-height: 30px; min-width: 30px; padding: 2px 7px; font-size: .78rem; font-weight: 700;
+      background: #1d2733; color: var(--text); border: 2px solid transparent;
+    }
+    .palette button[aria-pressed="true"] { border-color: var(--accent); background: #24404a; }
+    .palette i { display: inline-block; width: .8em; height: .8em; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+    #painter {
+      display: grid; gap: 1px; padding: 1px; background: #0a0e14; border: 1px solid #536279; border-radius: 6px;
+      touch-action: none; user-select: none; cursor: crosshair; margin-bottom: 10px;
+    }
+    #painter[hidden] { display: none; }
+    #painter span {
+      aspect-ratio: 1; display: grid; place-items: center; font: 700 clamp(7px, 1.1vw, 12px)/1 ui-monospace, monospace;
+      color: #0c1016; border-radius: 2px;
+    }
     .numbers { font-variant-numeric: tabular-nums; }
     #events { max-height: clamp(1.5em, 12dvh, 5.8em); overflow: auto; margin: 4px 0 0; padding-left: 1.35rem; }
     .muted { color: var(--muted); }
@@ -97,6 +115,12 @@
           <input id="wad" type="text" placeholder="/absolute/path/to/level.wad" spellcheck="false" autocomplete="off">
           <input id="map-name" type="text" value="MAP01" aria-label="Map name" spellcheck="false" maxlength="8">
         </div>
+        <div class="builder-head">
+          <label id="painter-label">Draw a map · click and drag</label>
+          <span><button id="blank" type="button">New blank map</button></span>
+        </div>
+        <div class="palette" id="palette" role="toolbar" aria-labelledby="painter-label"></div>
+        <div id="painter" role="grid" aria-labelledby="painter-label"></div>
         <label for="grid">ASCII grid</label>
         <textarea id="grid" rows="8" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="legend error"></textarea>
         <p class="legend" id="legend">
@@ -319,7 +343,101 @@
     requestAnimationFrame(refresh);
   }
 
-  void loadMaps();
+  // Map builder: paint tiles with the mouse; the ASCII grid stays the single source of truth.
+  const TILES = [
+    ['#', 'Wall', '#5b6b80'], ['.', 'Floor', '#222d3a'], ['P', 'Start', '#3ddc84'], ['E', 'Exit', '#7ce0d1'],
+    ['D', 'Door', '#b07a3c'], ['R', 'Red lock', '#e0464e'], ['B', 'Blue lock', '#4a7cf0'], ['Y', 'Yellow lock', '#e8c33a'],
+    ['r', 'Red key', '#ff8a8f'], ['b', 'Blue key', '#8fb1ff'], ['y', 'Yellow key', '#ffe28a'],
+    ['z', 'Zombie', '#ff6b6b'], ['c', 'Chaingunner', '#ff3d6e'], ['i', 'Imp', '#ff9f43'],
+    ['h', 'Health', '#9be39b'], ['k', 'Ammo', '#c9d6e3'],
+  ];
+  const tileColor = Object.fromEntries(TILES.map(([ch, , color]) => [ch, color]));
+  const painter = byId('painter');
+  const palette = byId('palette');
+  let brush = '#';
+  let painting = false;
+  let rows = [];
+
+  TILES.forEach(([ch, name, color]) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.title = name;
+    button.setAttribute('aria-pressed', String(ch === brush));
+    button.innerHTML = `<i style="background:${color}"></i>`;
+    button.append(name);
+    button.addEventListener('click', () => {
+      brush = ch;
+      palette.querySelectorAll('button').forEach(other => other.setAttribute('aria-pressed', String(other === button)));
+    });
+    palette.append(button);
+  });
+
+  function paintCell(cell, ch) {
+    cell.style.background = tileColor[ch] || '#222d3a';
+    cell.textContent = ch === '#' || ch === '.' ? '' : ch;
+  }
+
+  function drawPainter() {
+    const lines = grid.value.replace(/\n+$/, '').split('\n');
+    const width = Math.max(1, ...lines.map(line => line.length));
+    rows = lines.map(line => line.padEnd(width, '#').split(''));
+    painter.style.gridTemplateColumns = `repeat(${width}, 1fr)`;
+    const cells = [];
+    rows.forEach((row, y) => row.forEach((ch, x) => {
+      const cell = document.createElement('span');
+      cell.dataset.x = x; cell.dataset.y = y;
+      paintCell(cell, ch);
+      cells.push(cell);
+    }));
+    painter.replaceChildren(...cells);
+    painter.hidden = grid.disabled;
+  }
+
+  function applyBrush(cell) {
+    if (!cell || cell.dataset.x === undefined || grid.disabled) return;
+    const x = Number(cell.dataset.x), y = Number(cell.dataset.y);
+    if (brush === 'P') {  // one start only: moving it clears the old one
+      rows.forEach((row, ry) => row.forEach((ch, rx) => {
+        if (ch === 'P' && (rx !== x || ry !== y)) {
+          row[rx] = '.';
+          paintCell(painter.children[ry * row.length + rx], '.');
+        }
+      }));
+    }
+    if (rows[y][x] === brush) return;
+    rows[y][x] = brush;
+    paintCell(cell, brush);
+    grid.value = rows.map(row => row.join('')).join('\n');
+    examples.value = '';
+    showError('');
+  }
+
+  painter.addEventListener('pointerdown', event => {
+    painting = true;
+    painter.setPointerCapture(event.pointerId);
+    applyBrush(event.target);
+  });
+  painter.addEventListener('pointermove', event => {
+    if (painting) applyBrush(document.elementFromPoint(event.clientX, event.clientY));
+  });
+  ['pointerup', 'pointercancel'].forEach(name => painter.addEventListener(name, () => { painting = false; }));
+
+  byId('blank').addEventListener('click', () => {
+    const w = 17, h = 11;
+    grid.value = Array.from({length: h}, (_, y) =>
+      y === 0 || y === h - 1 ? '#'.repeat(w) :
+      '#' + (y === 5 ? 'P' + '.'.repeat(w - 4) + 'E' : '.'.repeat(w - 2)) + '#').join('\n');
+    wad.value = ''; examples.value = ''; grid.disabled = false;
+    showError('');
+    drawPainter();
+  });
+
+  grid.addEventListener('input', drawPainter);
+  examples.addEventListener('change', drawPainter);
+  wad.addEventListener('input', drawPainter);
+  mapName.addEventListener('input', drawPainter);
+
+  void loadMaps().then(drawPainter);
   requestAnimationFrame(refresh);
 </script>
 </body>
