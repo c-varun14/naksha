@@ -5,149 +5,140 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Naksha · draw a map, watch it play</title>
   <style>
-    :root {
-      color-scheme: dark;
-      --background: #0c1016;
-      --panel: #141b24;
-      --border: #344252;
-      --text: #f1f5fb;
-      --muted: #bac7d6;
-      --accent: #7ce0d1;
-      --error: #ff9c9f;
-      font: 16px/1.45 system-ui, sans-serif;
-    }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: var(--background); color: var(--text); }
-    main {
-      display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
-      gap: 10px; height: 100dvh; padding: 10px clamp(8px, 2vw, 28px);
-    }
-    h1, h2, p { margin: 0; }
-    h1 { font-size: 1.5rem; letter-spacing: -.035em; }
-    h1 strong { color: var(--accent); }
-    h2 { font-size: 1.2rem; }
-    .card { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
-    .toolbar { position: relative; display: flex; align-items: center; justify-content: space-between; }
-    summary {
-      cursor: pointer; padding: 6px 12px; border: 1px solid var(--border);
-      border-radius: 7px; background: var(--panel); font-weight: 650;
-    }
-    .editor {
-      position: absolute; z-index: 1; top: calc(100% + 8px); right: 0;
-      width: min(560px, 100%); max-height: calc(100dvh - 175px); overflow: auto;
-      box-shadow: 0 12px 30px #0008;
-    }
-    .viewport { position: relative; overflow: hidden; background: #070b10; }
-    #frame { display: block; width: 100%; height: 100%; object-fit: contain; }
-    #screen-message {
-      position: absolute; inset: 0; display: grid; place-items: center; padding: 16px;
-      background: #0c1016a8; text-align: center; font-size: clamp(1rem, 2.4vw, 1.5rem);
-    }
-    #screen-message[hidden], [hidden] { display: none; }
-    .editor, .panel { padding: 10px 14px; }
-    .panel header { display: flex; align-items: baseline; gap: 4px 16px; flex-wrap: wrap; }
-    label { display: block; font-weight: 650; }
-    #examples, .wad-fields { margin-bottom: 10px; }
-    textarea, select, input, button { color: inherit; font: inherit; }
-    textarea, select, input {
-      width: 100%; border: 1px solid #536279; border-radius: 6px;
-      padding: 6px 9px; background: #0c1119;
-    }
-    label + select, label + textarea, label + input { margin-top: 4px; }
-    .wad-fields { display: grid; grid-template-columns: 1fr 7em; gap: 8px; }
-    .wad-fields > label { grid-column: 1 / -1; }
-    textarea:disabled { opacity: .5; }
-    textarea {
-      display: block; min-height: 5em; height: clamp(5em, 18vh, 13em); resize: vertical;
-      white-space: pre; font-family: ui-monospace, monospace; line-height: 1.25; color: #e6f0fb;
-    }
-    :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
-    .legend { display: flex; gap: 4px 12px; flex-wrap: wrap; margin: 8px 0 12px; color: var(--muted); font-size: .85rem; }
-    .legend span { display: inline-block; }
-    .legend code { color: var(--text); font-size: 1em; font-weight: bold; }
-    .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin-top: 10px; }
-    .controls > * { flex: 1 0 auto; }
-    button {
-      min-height: 46px; padding: 4px 14px; border: none; border-radius: 7px;
-      background: var(--accent); color: #092420; font-size: 1.2rem; font-weight: 800; cursor: pointer;
-    }
-    button:disabled { opacity: .6; cursor: wait; }
-    #memory { background: #253543; color: var(--text); }
-    #memory[aria-checked="false"] { background: #a5212f; }
-    .error { color: var(--error); margin-top: 8px; font-weight: 650; }
-    .builder-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 4px; }
-    .builder-head button { min-height: 30px; padding: 2px 10px; font-size: .85rem; background: #253543; color: var(--text); }
-    .palette { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
-    .palette button {
-      min-height: 30px; min-width: 30px; padding: 2px 7px; font-size: .78rem; font-weight: 700;
-      background: #1d2733; color: var(--text); border: 2px solid transparent;
-    }
-    .palette button[aria-pressed="true"] { border-color: var(--accent); background: #24404a; }
-    .palette i { display: inline-block; width: .8em; height: .8em; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
-    #painter {
-      display: grid; gap: 1px; padding: 1px; background: #0a0e14; border: 1px solid #536279; border-radius: 6px;
-      touch-action: none; user-select: none; cursor: crosshair; margin-bottom: 10px;
-    }
-    #painter[hidden] { display: none; }
-    #painter span {
-      aspect-ratio: 1; display: grid; place-items: center; font: 700 clamp(7px, 1.1vw, 12px)/1 ui-monospace, monospace;
-      color: #0c1016; border-radius: 2px;
-    }
-    .numbers { font-variant-numeric: tabular-nums; }
-    #events { max-height: clamp(1.5em, 12dvh, 5.8em); overflow: auto; margin: 4px 0 0; padding-left: 1.35rem; }
-    .muted { color: var(--muted); }
-    #outcome { margin-left: auto; color: var(--accent); font-weight: 750; }
-    #outcome[data-result="dead"] { color: var(--error); }
-    #outcome[data-result="timeout"], #desync { color: #ffda86; }
+    :root { color-scheme: dark; --background:#0c1016; --panel:#141b24; --border:#2b3746; --text:#f1f5fb;
+      --muted:#a9b8ca; --accent:#7ce0d1; --error:#ff9c9f; font:15px/1.4 system-ui,sans-serif; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--background); color:var(--text); overflow:hidden; }
+    main { display:grid; height:100dvh; gap:10px; padding:10px 14px; grid-template-columns:400px minmax(0,1fr);
+      grid-template-rows:auto minmax(0,1fr) auto; grid-template-areas:"top top" "side view" "side log"; }
+    main.watching { grid-template-columns:minmax(0,1fr); grid-template-areas:"top" "view" "log"; }
+    main.watching .editor { display:none; }
+    h1,h2,h3,p { margin:0; }
+    h1 { font-size:1.45rem; letter-spacing:-.03em; color:var(--accent); }
+    h1 span { color:var(--muted); font-size:.95rem; font-weight:500; letter-spacing:0; margin-left:10px; }
+    h2 { font-size:1.05rem; }
+    .card { border:1px solid var(--border); border-radius:10px; background:var(--panel); }
+    .toolbar { grid-area:top; display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .editor { grid-area:side; display:flex; flex-direction:column; min-height:0; }
+    .scroll { flex:1; min-height:0; overflow:auto; padding:10px 12px; }
+    .dock { border-top:1px solid var(--border); padding:10px 12px; }
+    .viewport { grid-area:view; position:relative; overflow:hidden; background:#070b10; min-height:0; }
+    #frame { display:block; width:100%; height:100%; object-fit:contain; }
+    #screen-message { position:absolute; inset:0; display:grid; place-content:center; justify-items:center; gap:18px;
+      padding:20px; background:#0a0f15; text-align:center; }
+    #screen-title { font-size:1.55rem; font-weight:700; }
+    .steps { display:flex; flex-wrap:wrap; justify-content:center; gap:10px; padding:0; margin:0; list-style:none; counter-reset:s; }
+    .steps li { counter-increment:s; width:190px; padding:12px; border:1px solid var(--border); border-radius:9px;
+      color:var(--muted); text-align:left; }
+    .steps li::before { content:counter(s); display:block; color:var(--accent); font-size:1.3rem; font-weight:800; }
+    #screen-note { color:var(--muted); font-size:.9rem; max-width:48ch; }
+    #screen-message[hidden], [hidden] { display:none !important; }
+    .panel { grid-area:log; padding:8px 14px; }
+    .panel header { display:flex; align-items:baseline; gap:4px 16px; flex-wrap:wrap; }
+    label { display:block; font-weight:650; }
+    textarea,select,input,button { color:inherit; font:inherit; }
+    textarea,select,input { width:100%; border:1px solid #45566d; border-radius:6px; padding:6px 9px; background:#0c1119; }
+    label + select, label + textarea { margin-top:4px; }
+    .wad-fields { display:grid; grid-template-columns:1fr 6.5em; gap:6px; margin:10px 0; }
+    .wad-fields > label { grid-column:1/-1; }
+    textarea { display:block; height:9em; resize:vertical; white-space:pre; font-family:ui-monospace,monospace; line-height:1.25; }
+    textarea:disabled { opacity:.5; }
+    :focus-visible { outline:3px solid var(--accent); outline-offset:2px; }
+    button { min-height:42px; padding:4px 14px; border:0; border-radius:7px; background:var(--accent); color:#092420;
+      font-weight:800; cursor:pointer; }
+    button:disabled { opacity:.6; cursor:wait; }
+    .quiet, .builder-head button { min-height:30px; padding:2px 10px; font-size:.85rem; background:#253543; color:var(--text); }
+    .builder-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:12px; }
+    .palette { display:grid; grid-template-columns:repeat(4,1fr); gap:4px; margin:6px 0 8px; }
+    .palette button { display:flex; align-items:center; gap:5px; min-height:27px; padding:1px 5px; font-size:.74rem;
+      font-weight:650; background:#1d2733; color:var(--text); border:2px solid transparent; white-space:nowrap; }
+    .palette button[aria-pressed="true"] { border-color:var(--accent); background:#24404a; }
+    .palette i { flex:none; width:.8em; height:.8em; border-radius:2px; border:1px solid #6b7a8f; }
+    #painter { display:grid; gap:1px; width:max-content; max-width:100%; margin:0 auto; padding:1px; background:#0a0e14;
+      border:1px solid #45566d; border-radius:6px; touch-action:none; user-select:none; cursor:crosshair; }
+    #painter span { aspect-ratio:1; display:grid; place-items:center; overflow:hidden; color:#0c1016; border-radius:2px;
+      font:700 11px/1 ui-monospace,monospace; }
+    details { margin-top:12px; border-top:1px solid var(--border); padding-top:8px; }
+    summary { cursor:pointer; font-weight:650; color:var(--muted); }
+    .legend { display:flex; gap:3px 12px; flex-wrap:wrap; margin:8px 0 0; color:var(--muted); font-size:.82rem; }
+    .legend code { color:var(--text); font-weight:bold; }
+    .controls { display:grid; grid-template-columns:8.5em 1fr; gap:8px; align-items:end; }
+    #play { font-size:1.15rem; }
+    #memory { width:100%; margin-top:10px; background:#253543; color:var(--text); font-weight:650; }
+    #memory[aria-checked="false"] { background:#8f1d2a; }
+    .error { color:var(--error); margin:0 0 8px; font-weight:650; }
+    .numbers { font-variant-numeric:tabular-nums; }
+    #events { display:flex; flex-wrap:wrap; gap:2px 28px; max-height:3.2em; overflow:auto; margin:3px 0 0; padding-left:1.3rem; }
+    .muted { color:var(--muted); }
+    #outcome { margin-left:auto; color:var(--accent); font-weight:750; font-size:1.1rem; }
+    #outcome[data-result="dead"] { color:var(--error); }
+    #outcome[data-result="timeout"], #desync { color:#ffda86; }
+    @media (max-width:900px) { body { overflow:auto; } main, main.watching { height:auto; grid-template-columns:1fr;
+      grid-template-areas:"top" "view" "log" "side"; grid-template-rows:auto 56vw auto auto; }
+      main.watching { grid-template-areas:"top" "view" "log"; } }
   </style>
 </head>
 <body>
-<main>
+<main id="app">
   <header class="toolbar">
-    <h1><strong>Naksha</strong></h1>
-    <details id="drawer">
-      <summary>Map controls</summary>
-      <form id="editor" class="editor card">
-        <label for="examples">Example map</label>
-        <select id="examples"><option value="">Custom map</option></select>
-        <div class="wad-fields">
-          <label for="wad">Load map file</label>
-          <input id="wad" type="text" placeholder="/absolute/path/to/level.wad" spellcheck="false" autocomplete="off">
-          <input id="map-name" type="text" value="MAP01" aria-label="Map name" spellcheck="false" maxlength="8">
-        </div>
-        <div class="builder-head">
-          <label id="painter-label">Draw a map · click and drag</label>
-          <span><button id="blank" type="button">New blank map</button></span>
-        </div>
-        <div class="palette" id="palette" role="toolbar" aria-labelledby="painter-label"></div>
-        <div id="painter" role="grid" aria-labelledby="painter-label"></div>
-        <label for="grid">ASCII grid</label>
+    <h1>Naksha<span>Draw a map. Watch the trained network play it.</span></h1>
+    <button id="toggle" class="quiet" type="button" aria-controls="editor" aria-expanded="true">Hide map editor</button>
+  </header>
+  <form id="editor" class="editor card">
+    <div class="scroll">
+      <label for="examples">Example map</label>
+      <select id="examples"><option value="">Custom map</option></select>
+      <div class="builder-head">
+        <label id="painter-label">Draw: pick a tile, then drag</label>
+        <button id="blank" type="button">New blank map</button>
+      </div>
+      <div class="palette" id="palette" role="toolbar" aria-labelledby="painter-label"></div>
+      <div id="painter" role="grid" aria-labelledby="painter-label"></div>
+      <details>
+        <summary>Advanced: text grid, map file, memory test</summary>
+        <label for="grid" style="margin-top:8px">ASCII grid</label>
         <textarea id="grid" rows="8" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="legend error"></textarea>
         <p class="legend" id="legend">
           <span><code>#</code> wall</span><span><code>.</code> floor</span>
           <span><code>P</code> start</span><span><code>E</code> exit</span>
           <span><code>D</code> door</span><span><code>R B Y</code> locked doors</span>
           <span><code>r b y</code> keycards</span><span><code>z s c i d</code> monsters</span>
-          <span><code>h m a k l</code> items</span>
+          <span><code>h m a k l</code> items</span><span><code>x</code> barrel</span>
         </p>
-        <div class="controls">
-          <div>
-            <label for="speed">Speed</label>
-            <select id="speed">
-              <option value="0.5">0.5×</option><option value="1" selected>1× real time</option>
-              <option value="2">2×</option><option value="4">4×</option>
-            </select>
-          </div>
-          <button id="memory" type="button" role="switch" aria-label="Memory" aria-checked="true">Memory: ON</button>
-          <button id="play" type="submit">Play</button>
+        <div class="wad-fields">
+          <label for="wad">Load a map file (WAD)</label>
+          <input id="wad" type="text" placeholder="/absolute/path/to/level.wad" spellcheck="false" autocomplete="off">
+          <input id="map-name" type="text" value="MAP01" aria-label="Map name" spellcheck="false" maxlength="8">
         </div>
-        <p id="error" class="error" role="alert" hidden></p>
-      </form>
-    </details>
-  </header>
+        <button id="memory" type="button" role="switch" aria-checked="true">Agent memory: on</button>
+        <p class="legend">Off wipes the network's memory before every move.</p>
+      </details>
+    </div>
+    <div class="dock">
+      <p id="error" class="error" role="alert" hidden></p>
+      <div class="controls">
+        <div>
+          <label for="speed">Speed</label>
+          <select id="speed">
+            <option value="0.5">0.5×</option><option value="1" selected>1×</option>
+            <option value="2">2×</option><option value="4">4×</option>
+          </select>
+        </div>
+        <button id="play" type="submit">▶ Play this map</button>
+      </div>
+    </div>
+  </form>
   <section class="viewport card" aria-label="Live episode">
     <img id="frame" width="1600" height="900" alt="First-person game view, audience map, and episode status">
-    <p id="screen-message">Choose or type a map, then press Play.</p>
+    <div id="screen-message">
+      <p id="screen-title">Can it find the way out of your map?</p>
+      <ol class="steps" id="steps">
+        <li>Pick an example, or draw your own walls, doors, keys and monsters.</li>
+        <li>Press Play. The grid is compiled into a real DOOM level.</li>
+        <li>Watch what it sees and what it thinks it should do next.</li>
+      </ol>
+      <p id="screen-note">The network is never shown the overhead map. It gets local observations and its own memory.</p>
+    </div>
   </section>
   <section class="panel card" aria-labelledby="events-title">
     <header>
@@ -156,7 +147,7 @@
       <span id="desync" hidden></span>
       <p id="outcome" role="status" hidden></p>
     </header>
-    <p id="empty-log" class="muted">Waiting for events.</p>
+    <p id="empty-log" class="muted">Keys, doors and the exit appear here as they happen.</p>
     <ol id="events" hidden></ol>
   </section>
 </main>
@@ -173,7 +164,15 @@
   const error = byId('error');
   const events = byId('events');
   const outcome = byId('outcome');
-  const drawer = byId('drawer');
+  const app = byId('app');
+  const toggle = byId('toggle');
+  function showEditor(open) {
+    app.classList.toggle('watching', !open);
+    toggle.textContent = open ? 'Hide map editor' : 'Edit map';
+    toggle.setAttribute('aria-expanded', String(open));
+    if (open) fitPainter();
+  }
+  toggle.addEventListener('click', () => showEditor(app.classList.contains('watching')));
   const outcomes = {exit: 'Exit reached', dead: 'Naksha died', timeout: 'Time ran out',
     spectator_desync: 'Spectator ended early'};
   let maps = [];
@@ -190,7 +189,7 @@
   function showError(message) {
     error.textContent = message;
     error.hidden = !message;
-    if (message) drawer.open = true;
+    if (message) showEditor(true);
   }
 
   async function getJson(path, options) {
@@ -239,7 +238,7 @@
   memory.addEventListener('click', () => {
     const enabled = memory.getAttribute('aria-checked') !== 'true';
     memory.setAttribute('aria-checked', String(enabled));
-    memory.textContent = enabled ? 'Memory: ON' : 'Memory: OFF';
+    memory.textContent = enabled ? 'Agent memory: on' : 'Agent memory: OFF';
   });
 
   form.addEventListener('submit', async event => {
@@ -260,8 +259,8 @@
       });
       expectedRun = reply.run_id;
       displayed = '';
-      drawer.open = false;
-      drawer.querySelector('summary').focus();
+      showEditor(false);
+      toggle.focus();
       updateState({outcome: 'running', health: null, events: []});
     } catch (failure) {
       showError(failure.message);
@@ -296,8 +295,10 @@
     outcome.hidden = !result;
     screenMessage.hidden = ready;
     if (!ready) {
-      screenMessage.textContent = state.error ? 'Episode unavailable.' :
-        state.outcome === 'running' ? 'Starting episode…' : 'Choose or type a map, then press Play.';
+      const idle = !state.error && state.outcome !== 'running';
+      byId('screen-title').textContent = state.error ? 'Episode unavailable.' :
+        idle ? 'Can it find the way out of your map?' : 'Building the level…';
+      byId('steps').hidden = byId('screen-note').hidden = !idle;
     }
   }
 
@@ -349,7 +350,9 @@
     ['D', 'Door', '#b07a3c'], ['R', 'Red lock', '#e0464e'], ['B', 'Blue lock', '#4a7cf0'], ['Y', 'Yellow lock', '#e8c33a'],
     ['r', 'Red key', '#ff8a8f'], ['b', 'Blue key', '#8fb1ff'], ['y', 'Yellow key', '#ffe28a'],
     ['z', 'Zombie', '#ff6b6b'], ['c', 'Chaingunner', '#ff3d6e'], ['i', 'Imp', '#ff9f43'],
-    ['h', 'Health', '#9be39b'], ['k', 'Ammo', '#c9d6e3'],
+    ['s', 'Shotgunner', '#d97878'], ['d', 'Pinky', '#e87fb0'],
+    ['h', 'Health', '#9be39b'], ['m', 'Medikit', '#5fcf8a'], ['a', 'Armor', '#7fb8a0'],
+    ['k', 'Bullets', '#c9d6e3'], ['l', 'Shells', '#d9c9a3'], ['x', 'Barrel', '#8fa35a'],
   ];
   const tileColor = Object.fromEntries(TILES.map(([ch, , color]) => [ch, color]));
   const painter = byId('painter');
@@ -381,7 +384,6 @@
     const lines = grid.value.replace(/\n+$/, '').split('\n');
     const width = Math.max(1, ...lines.map(line => line.length));
     rows = lines.map(line => line.padEnd(width, '#').split(''));
-    painter.style.gridTemplateColumns = `repeat(${width}, 1fr)`;
     const cells = [];
     rows.forEach((row, y) => row.forEach((ch, x) => {
       const cell = document.createElement('span');
@@ -391,7 +393,18 @@
     }));
     painter.replaceChildren(...cells);
     painter.hidden = grid.disabled;
+    fitPainter();
   }
+
+  // Square cells that fit the panel for both wide and tall maps.
+  function fitPainter() {
+    if (!rows.length) return;
+    const wide = painter.parentElement.clientWidth - 28;
+    const tall = Math.max(150, window.innerHeight - 450);
+    const size = Math.max(5, Math.floor(Math.min(34, wide / rows[0].length - 1, tall / rows.length - 1)));
+    painter.style.gridTemplateColumns = `repeat(${rows[0].length}, ${size}px)`;
+  }
+  window.addEventListener('resize', fitPainter);
 
   function applyBrush(cell) {
     if (!cell || cell.dataset.x === undefined || grid.disabled) return;

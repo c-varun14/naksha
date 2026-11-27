@@ -74,7 +74,7 @@ Spatial memory v2 uses learned odometry to estimate forward and sideways motion 
 | Velocity-based dead-reckoning drift after 200 steps | 343 map units |
 | Spatial memory time per step | 0.2 ms |
 
-Spatial memory v2 is not in the submitted checkpoint, which uses the plain GRU. Its exit-rate ablation is pending.
+Spatial memory v2 is not in the submitted checkpoint, which uses the plain GRU. In a matched test (both trained from the same cloned model on the same data) the two tied on the development score, 5.81 each: with the grid, gauntlet exits rose from 41% to 56% and multi-room exits fell from 78% to 59% (27 runs per family).
 
 ## Reproduce
 
@@ -129,9 +129,11 @@ uv run --no-sync python -m training.eval.report \
 uv run --no-sync python -m demo.server --port 8765 --weights submission/weights/naksha.pt --maps data/suites/dev.json
 ```
 
-Open `http://127.0.0.1:8765`. Type an ASCII map or pick an example, then watch the agent play live with its predicted intention, keys and events. [ASCII map legend](training/gen/compile.py)
+Open `http://127.0.0.1:8765`. Pick an example or draw your own map (the text grid is under Advanced), then press Play and watch the agent play live with its predicted intention, keys and events. [ASCII map legend](training/gen/compile.py)
 
 `demo/record.py` records episodes. [Recorder](demo/record.py)
+
+Recorded runs of the submitted model: [Keycard run](demo/videos/01-keycard.mp4) · [Ambush run](demo/videos/02-ambush.mp4)
 
 ## Limits
 
