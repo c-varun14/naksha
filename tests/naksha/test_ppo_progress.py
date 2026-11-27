@@ -68,3 +68,46 @@ def test_a_round_trip_nets_zero_even_with_a_long_retreat_and_a_jump_resets_the_b
     assert np.isclose(walk(shaping, [4, 3, 2, 3, 4, 5]), 0.0)
     assert shaping.step(at(9))[0] == 0.0  # a 4-cell jump pays nothing
     assert np.isclose(shaping.step(at(10))[0], 0.01)
+
+
+from training.ppo.ppo import FrontierShaping  # noqa: E402
+
+DEAD_END = "###########\n#E.....P..#\n###########"
+
+
+def test_frontier_dead_end_excursion_costs_coming_back_pays_and_a_new_sighting_retargets():
+    shaping = FrontierShaping(Flat(), at(7), DEAD_END, 0.01)
+    assert shaping.distance == 3  # cols 5-9 seen from col 7; the nearest unseen cell is col 4
+    assert np.isclose(shaping.step(at(8))[0], -0.01)  # deeper into the explored dead end
+    assert np.isclose(shaping.step(at(9))[0], -0.01)
+    assert np.isclose(walk(shaping, [8, 7]), 0.02)  # walking back out pays it back
+    assert shaping.step(at(6))[0] == 0.0  # col 4 comes into view: re-target, no payment
+    assert shaping.distance == 3
+
+
+def test_frontier_circling_explored_cells_nets_zero():
+    shaping = FrontierShaping(Flat(), at(7), DEAD_END, 0.01)
+    assert np.isclose(walk(shaping, [8, 9, 8, 7, 8, 9, 8, 7]), 0.0)
+
+
+def test_frontier_switches_to_the_exit_once_seen_so_returning_to_it_pays():
+    grid = "##############\n#P.E.........#\n##############"  # the exit is within sight of the start
+    shaping = FrontierShaping(Flat(), at(1), grid, 0.01)
+    assert shaping.mode == "exit" and shaping.distance == 2
+    away = walk(shaping, [2, 3, 4, 5, 6])  # walking past the exit costs, even while new cells come into view
+    assert np.isclose(away, -0.01 * 3 + 0.01 * 2)  # cols 2, 3 approach (+2); cols 4-6 retreat (-3)
+    back = walk(shaping, [5, 4, 3])
+    assert np.isclose(back, 0.03)
+
+
+def test_frontier_ignores_an_exit_it_cannot_reach_yet():
+    grid = "##########\n#P.R.E...#\n##########"  # the exit is behind a red lock the agent has no key for
+    shaping = FrontierShaping(Flat(), at(1), grid, 0.01)
+    assert shaping.mode == "frontier"
+
+
+def test_frontier_targets_only_exits_it_has_seen():
+    grid = "###############\n#E.P..........E#\n###############"  # one exit in sight, one far away
+    shaping = FrontierShaping(Flat(), at(3), grid, 0.01)
+    assert shaping.mode == "exit" and shaping.distance == 2
+    assert np.isclose(shaping.step(at(4))[0], -0.01)  # walking toward the unseen exit is not paid

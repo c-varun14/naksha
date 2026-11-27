@@ -229,7 +229,8 @@ class ProgressShaping:
     def _held(state: dict) -> tuple[bool, ...]:
         return tuple(bool(k > 0) for k in np.asarray(state["keys"])[:3])
 
-    def _bfs(self, sources: list[tuple[int, int]], held: tuple[bool, ...]) -> dict[tuple[int, int], int]:
+    def _bfs(self, sources: list[tuple[int, int]], held: tuple[bool, ...],
+             limit: int | None = None) -> dict[tuple[int, int], int]:
         def passable(cell: tuple[int, int]) -> bool:
             ch = self.free.get(cell)
             return ch is not None and (ch not in self.LOCKS or held[self.LOCKS[ch]])
@@ -238,6 +239,8 @@ class ProgressShaping:
         queue = deque(dist)
         while queue:
             x, y = queue.popleft()
+            if limit is not None and dist[(x, y)] >= limit:
+                continue
             for cell in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
                 if cell not in dist and passable(cell):
                     dist[cell] = dist[(x, y)] + 1
@@ -272,6 +275,72 @@ class ProgressShaping:
     @property
     def total(self) -> float:
         return self.base.total + self.progress
+
+
+class FrontierShaping(ProgressShaping):
+    """Training-only exploration reward, added to another reward: explore until the exit has been seen, then go
+    to it. Before the exit is seen (or while it can't be reached with the keys held), it pays per cell of
+    shortest-walk progress toward the nearest free cell not yet seen; a cell counts as seen once the agent has
+    stood within SEEN_RADIUS walking steps of it, and every new sighting re-targets without paying, so it is
+    earned only by heading out of explored space (leaving dead ends, not circling seen rooms). Once the exit is
+    seen and reachable, it pays per cell of progress toward the exit instead. Locked doors pass only with their
+    key; a key pickup rescans the current spot with the new key. Round trips on a fixed target net zero."""
+
+    SEEN_RADIUS = 2
+
+    def __init__(self, base, state: dict, grid: str, scale: float) -> None:
+        rows = grid.strip("\n").split("\n")
+        self.free = {(c, len(rows) - 1 - r): ch for r, row in enumerate(rows) for c, ch in enumerate(row) if ch != "#"}
+        self.exits = [cell for cell, ch in self.free.items() if ch == "E"]
+        self.base, self.scale, self.progress = base, scale, 0.0
+        self.held = self._held(state)
+        self.seen: set[tuple[int, int]] = set()
+        self.visited: set[tuple[int, int]] = set()
+        self._see(_cell(state))
+        self._fields()
+        self.mode, self.distance = self._lookup(_cell(state))
+
+    def _see(self, cell: tuple[int, int]) -> bool:
+        if cell in self.visited or cell not in self.free:
+            return False
+        self.visited.add(cell)
+        before = len(self.seen)
+        self.seen |= set(self._bfs([cell], self.held, self.SEEN_RADIUS))
+        return len(self.seen) > before
+
+    def _fields(self) -> None:
+        self.exit_field = self._bfs([cell for cell in self.exits if cell in self.seen], self.held)
+        self.frontier_field = self._bfs([cell for cell in self.free if cell not in self.seen], self.held)
+
+    def _lookup(self, cell: tuple[int, int]) -> tuple[str, int | None]:
+        if cell in self.exit_field:
+            return "exit", self.exit_field[cell]
+        return "frontier", self.frontier_field.get(cell)
+
+    def step(self, state: dict) -> tuple[float, int, int]:
+        reward, kills, novel = self.base.step(state)
+        cell = _cell(state)
+        held = self._held(state)
+        keys_changed = held != self.held
+        if keys_changed:
+            self.held = held
+            self.visited.discard(cell)  # look again with the new key
+        grew = self._see(cell)
+        if keys_changed or grew:
+            self._fields()
+        mode, distance = self._lookup(cell)
+        # Re-target without paying when the target changes: new keys, a switch between exploring and exiting,
+        # or a new sighting while exploring. On a fixed target, pay the progress.
+        if keys_changed or mode != self.mode or (grew and mode == "frontier"):
+            self.mode, self.distance = mode, distance
+            return reward, kills, novel
+        if distance is not None and self.distance is not None and abs(self.distance - distance) <= self.MAX_STEP:
+            delta = self.scale * (self.distance - distance)
+            reward += delta
+            self.progress += delta
+        if distance is not None:
+            self.distance = distance
+        return reward, kills, novel
 
 
 @dataclass
@@ -349,6 +418,9 @@ class Collector:
         progress = getattr(args, "progress_reward", 0.0)
         if progress and not self.stock:
             self.reward = ProgressShaping(self.reward, self.env.privileged_state(), spec["grid"], progress)
+        frontier = getattr(args, "frontier_reward", 0.0)
+        if frontier and not self.stock:
+            self.reward = FrontierShaping(self.reward, self.env.privileged_state(), spec["grid"], frontier)
         self.hidden = self.model.initial_state(1)
         self.prev_action = 0
 
@@ -620,9 +692,10 @@ def train(args: argparse.Namespace) -> dict:
     survival, stall = getattr(args, "survival", False), getattr(args, "stall_penalty", 0.0)
     score = getattr(args, "score_reward", False)
     progress = getattr(args, "progress_reward", 0.0)
-    if survival or stall or score or progress:
+    frontier = getattr(args, "frontier_reward", 0.0)
+    if survival or stall or score or progress or frontier:
         meta["reward"] = {"survival": survival, "stall_penalty": stall, "score_reward": score,
-                          "progress_reward": progress}
+                          "progress_reward": progress, "frontier_reward": frontier}
     deadline = perf_counter() + 60 * args.minutes
     with TemporaryDirectory(prefix="naksha-ppo-") as scratch, log_path.open("w", newline="", encoding="utf-8") as log:
         weights = Path(scratch) / "policy.pt"
@@ -688,6 +761,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                         help="per-step penalty once 150 steps pass without a new cell")
     parser.add_argument("--progress-reward", type=float, default=0.0,
                         help="on generated maps, reward per grid cell of walking progress toward the next objective")
+    parser.add_argument("--frontier-reward", type=float, default=0.0,
+                        help="on generated maps, reward per grid cell of walking progress toward the nearest unseen cell")
     parser.add_argument("--seed-offset", type=int, default=300_000)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--kl-coef", type=float, default=0.05)
@@ -720,6 +795,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("--score-reward and --survival are alternatives")
     if not (math.isfinite(args.progress_reward) and args.progress_reward >= 0):
         parser.error("progress-reward must be finite and nonnegative")
+    if not (math.isfinite(args.frontier_reward) and args.frontier_reward >= 0):
+        parser.error("frontier-reward must be finite and nonnegative")
     if not (math.isfinite(args.stall_penalty) and args.stall_penalty >= 0):
         parser.error("stall-penalty must be finite and nonnegative")
     if args.stock_frac and not args.stock_maps:
