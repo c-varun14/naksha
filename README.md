@@ -57,7 +57,7 @@ Inference uses one CPU thread and no GPU memory. The weights occupy 6.6 MB. The 
 | CPU decision latency | p50 | p99 |
 | --- | ---: | ---: |
 | Local (`validate.py`) | 3.3 ms | 3.7 ms |
-| CI validator | 1.0 ms | 1.6 ms |
+| CI validator (GitHub Actions) | 1.9 ms | 2.4 ms |
 
 GitHub Actions fetches weights through Git LFS and runs the organiser wrapper tests, compiler parity, model, agent, rules-guard, shard, DAgger-loop, PPO and demo tests, then the official `validate.py`, on pushes to `main` and on pull requests. [CI workflow](.github/workflows/ci.yml)
 
