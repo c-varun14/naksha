@@ -10,6 +10,7 @@ import math
 import multiprocessing as mp
 import os
 import random
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from multiprocessing.connection import Connection, wait
@@ -203,6 +204,76 @@ class EpisodeReward:
         return reward, kills, novel
 
 
+class ProgressShaping:
+    """Training-only reward for walking progress toward the next objective, added to another reward.
+
+    The objective is the exit when it can be reached with the keys held, otherwise the nearest key not yet
+    held; distance is the shortest 4-connected walk over the map grid from the true pose (locked doors pass
+    only with their key, other doors always). Each cell closer earns `scale` and each cell farther costs the
+    same, so any round trip nets exactly zero. Picking up a key re-targets without a jump: the locked door
+    it opens joins the route, so the agent is paid to walk back to it."""
+
+    LOCKS = {"B": 0, "Y": 1, "R": 2}
+    KEYS = {"b": 0, "y": 1, "r": 2}
+    MAX_STEP = 2  # cells; a bigger jump (re-entering the grid) resets the baseline instead of paying
+
+    def __init__(self, base, state: dict, grid: str, scale: float) -> None:
+        rows = grid.strip("\n").split("\n")
+        self.free = {(c, len(rows) - 1 - r): ch for r, row in enumerate(rows) for c, ch in enumerate(row) if ch != "#"}
+        self.base, self.scale, self.progress = base, scale, 0.0
+        self.fields: dict[tuple[bool, ...], tuple[dict, dict]] = {}
+        self.held = self._held(state)
+        self.distance = self._distance(state)
+
+    @staticmethod
+    def _held(state: dict) -> tuple[bool, ...]:
+        return tuple(bool(k > 0) for k in np.asarray(state["keys"])[:3])
+
+    def _bfs(self, sources: list[tuple[int, int]], held: tuple[bool, ...]) -> dict[tuple[int, int], int]:
+        def passable(cell: tuple[int, int]) -> bool:
+            ch = self.free.get(cell)
+            return ch is not None and (ch not in self.LOCKS or held[self.LOCKS[ch]])
+
+        dist = {cell: 0 for cell in sources if passable(cell)}
+        queue = deque(dist)
+        while queue:
+            x, y = queue.popleft()
+            for cell in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if cell not in dist and passable(cell):
+                    dist[cell] = dist[(x, y)] + 1
+                    queue.append(cell)
+        return dist
+
+    def _distance(self, state: dict) -> int | None:
+        if self.held not in self.fields:
+            exits = [cell for cell, ch in self.free.items() if ch == "E"]
+            keys = [cell for cell, ch in self.free.items() if ch in self.KEYS and not self.held[self.KEYS[ch]]]
+            self.fields[self.held] = (self._bfs(exits, self.held), self._bfs(keys, self.held))
+        exit_field, key_field = self.fields[self.held]
+        cell = _cell(state)
+        return exit_field[cell] if cell in exit_field else key_field.get(cell)
+
+    def step(self, state: dict) -> tuple[float, int, int]:
+        reward, kills, novel = self.base.step(state)
+        held = self._held(state)
+        if held != self.held:
+            self.held = held
+            self.distance = self._distance(state)
+            return reward, kills, novel
+        distance = self._distance(state)
+        if distance is not None and self.distance is not None and abs(self.distance - distance) <= self.MAX_STEP:
+            delta = self.scale * (self.distance - distance)
+            reward += delta
+            self.progress += delta
+        if distance is not None:
+            self.distance = distance
+        return reward, kills, novel
+
+    @property
+    def total(self) -> float:
+        return self.base.total + self.progress
+
+
 @dataclass
 class Rollout:
     features: dict[str, np.ndarray]
@@ -275,6 +346,9 @@ class Collector:
             self.reward = EpisodeReward(self.env.privileged_state(), self.env.mapinfo.door_sectors, stock=self.stock,
                                         survival=getattr(args, "survival", False),
                                         stall_penalty=getattr(args, "stall_penalty", 0.0))
+        progress = getattr(args, "progress_reward", 0.0)
+        if progress and not self.stock:
+            self.reward = ProgressShaping(self.reward, self.env.privileged_state(), spec["grid"], progress)
         self.hidden = self.model.initial_state(1)
         self.prev_action = 0
 
@@ -545,8 +619,10 @@ def train(args: argparse.Namespace) -> dict:
     meta = {"init": str(args.init), "iterations": 0, "steps": 0}
     survival, stall = getattr(args, "survival", False), getattr(args, "stall_penalty", 0.0)
     score = getattr(args, "score_reward", False)
-    if survival or stall or score:
-        meta["reward"] = {"survival": survival, "stall_penalty": stall, "score_reward": score}
+    progress = getattr(args, "progress_reward", 0.0)
+    if survival or stall or score or progress:
+        meta["reward"] = {"survival": survival, "stall_penalty": stall, "score_reward": score,
+                          "progress_reward": progress}
     deadline = perf_counter() + 60 * args.minutes
     with TemporaryDirectory(prefix="naksha-ppo-") as scratch, log_path.open("w", newline="", encoding="utf-8") as log:
         weights = Path(scratch) / "policy.pt"
@@ -610,6 +686,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                         help="on generated maps, reward = per-step change in the judge-style map score / 45")
     parser.add_argument("--stall-penalty", type=float, default=0.0,
                         help="per-step penalty once 150 steps pass without a new cell")
+    parser.add_argument("--progress-reward", type=float, default=0.0,
+                        help="on generated maps, reward per grid cell of walking progress toward the next objective")
     parser.add_argument("--seed-offset", type=int, default=300_000)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--kl-coef", type=float, default=0.05)
@@ -640,6 +718,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.extra_suite = args.extra_suite.resolve()  # workers run in a scratch directory
     if args.score_reward and args.survival:
         parser.error("--score-reward and --survival are alternatives")
+    if not (math.isfinite(args.progress_reward) and args.progress_reward >= 0):
+        parser.error("progress-reward must be finite and nonnegative")
     if not (math.isfinite(args.stall_penalty) and args.stall_penalty >= 0):
         parser.error("stall-penalty must be finite and nonnegative")
     if args.stock_frac and not args.stock_maps:
